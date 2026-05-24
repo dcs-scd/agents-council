@@ -11,6 +11,7 @@ import {
   resolveDefaultSummonAgent,
   summonAgent,
 } from "../../core/services/council/summon";
+import { runModelCouncil, saveModelCouncilRun, type ModelCouncilResult } from "../../core/services/modelCouncil";
 import { FileCouncilStateStore } from "../../core/state/fileStateStore";
 import {
   mapCloseSessionInput,
@@ -45,7 +46,8 @@ type ToolName =
   | "get_current_session_data"
   | "close_council"
   | "send_response"
-  | "summon_agent";
+  | "summon_agent"
+  | "run_model_council";
 type ToolContext = {
   cursor?: string;
   sessionId?: string;
@@ -56,6 +58,7 @@ const serverInstructions = [
   "If you are requested to join the council, call join_council with session_id, read the request, and send_response with the same session_id as soon as possible.",
   "Use get_current_session_data with session_id to poll for new responses; pass the cursor returned to fetch only newer messages.",
   "Use close_council with session_id to end that session with a conclusion.",
+  "Use run_model_council when the user wants Kimi 2.6, DeepSeek V4 Pro, Gemini 3.5 Flash, ChatGPT 5.5, and Opus 4.7 to deliberate and reach peer-ratified consensus without a chair.",
 ].join("\n");
 
 const server = new McpServer(
@@ -150,6 +153,12 @@ function registerTools(options: {
     .object({
       session_id: sessionIdSchema,
       conclusion: z.string().min(1),
+    })
+    .strict();
+
+  const runModelCouncilSchema: z.ZodTypeAny = z
+    .object({
+      prompt: z.string().min(1),
     })
     .strict();
 
@@ -385,6 +394,29 @@ function registerTools(options: {
       }
     },
   );
+
+  registerTool<{ prompt: string }>(
+    "run_model_council",
+    {
+      description:
+        "Run the configured autonomous multi-agent council: Kimi 2.6, DeepSeek V4 Pro, and Gemini 3.5 Flash through OpenRouter, ChatGPT 5.5 through local OpenAI subscription auth, and Opus 4.7 through local Anthropic (Claude Code) subscription auth. The agents propose, deliberate, and independently ratify or block consensus without a chair.",
+      inputSchema: runModelCouncilSchema,
+    },
+    async (params) => {
+      try {
+        const result = await runModelCouncil({ prompt: params.prompt });
+        try {
+          await saveModelCouncilRun(result);
+        } catch (saveError) {
+          const detail = saveError instanceof Error ? saveError.message : String(saveError);
+          console.error(`Warning: failed to save deliberation record: ${detail}`);
+        }
+        return toolOk("run_model_council", result);
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  );
 }
 
 function formatSummonModelDescriptions(
@@ -451,6 +483,8 @@ function formatToolText(toolName: ToolName, payload: unknown, context: ToolConte
       return formatSendResponse(payload as SendResponseResponse);
     case "summon_agent":
       return formatSummonAgent(payload as SummonAgentResponse);
+    case "run_model_council":
+      return formatModelCouncil(payload as ModelCouncilResult);
     default: {
       const _exhaustive: never = toolName;
       return _exhaustive;
@@ -546,4 +580,30 @@ function formatSummonAgent(response: SummonAgentResponse): string {
   }
   lines.push(`Response: ${response.feedback.content}`);
   return lines.join("\n");
+}
+
+function formatModelCouncil(response: ModelCouncilResult): string {
+  return [
+    response.consensus.reached
+      ? "The model council reached consensus by unanimous peer ratification."
+      : "The model council did not reach consensus.",
+    "",
+    "No single agent decided the result.",
+    "",
+    `Consensus process: ${response.responses.length} initial proposals, ${response.rounds.length} deliberation rounds, ${response.ratifications.length} peer ratifications.`,
+    `Candidate converged: ${response.converged ? "yes" : "no"}`,
+    `Accepted by: ${response.consensus.ratifiedBy.join(", ") || "none"}`,
+    `Blocked by: ${response.consensus.blockedBy.join(", ") || "none"}`,
+    "",
+    "Candidate consensus:",
+    response.candidateConsensus || "(none)",
+    "",
+    "Peer ratifications:",
+    ...(response.ratifications.length > 0
+      ? response.ratifications.flatMap((entry) => ["", `## ${entry.member.name}`, entry.content])
+      : ["", "Ratification skipped because the candidate consensus did not converge."]),
+    "",
+    "Members:",
+    ...response.responses.map((entry) => `- ${entry.member.name}: ${entry.member.model}`),
+  ].join("\n");
 }

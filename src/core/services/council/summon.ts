@@ -21,6 +21,7 @@ import {
   getFeedbackForSession,
   updateParticipant,
 } from "./index";
+import { OBJECTIVE_CONSENSUS_DIRECTIVE } from "./objectiveConsensusPrompt";
 import type { CouncilFeedback, CouncilRequest } from "./types";
 
 export const SUPPORTED_SUMMON_AGENTS = ["Claude", "Codex"] as const;
@@ -117,7 +118,7 @@ async function resolveExecutablePath(command: string): Promise<string> {
   return command;
 }
 
-async function getClaudeCodeExecutablePath(): Promise<string> {
+export async function getClaudeCodeExecutablePath(): Promise<string> {
   // Priority: config > env var > default "claude"
   const settings = await loadSummonSettings();
   if (settings.claudeCodePath) {
@@ -130,8 +131,11 @@ async function getClaudeCodeExecutablePath(): Promise<string> {
   return resolveExecutablePath("claude");
 }
 
-async function getCodexExecutablePath(): Promise<string | null> {
-  // Priority: config > env var > default (bundled binary)
+export async function getCodexExecutablePath(): Promise<string | null> {
+  // Priority: config > env var > system `codex` on PATH > null (SDK's bundled binary).
+  // The bundled binary can lag the system install and reject newer models
+  // (e.g. gpt-5.5 needs codex >= ~0.133, while the SDK ships 0.79), so prefer a
+  // system codex when one is installed; fall back to the bundled binary otherwise.
   const settings = await loadSummonSettings();
   if (settings.codexPath) {
     return resolveExecutablePath(settings.codexPath);
@@ -139,6 +143,10 @@ async function getCodexExecutablePath(): Promise<string | null> {
   const envPath = process.env[CODEX_PATH_ENV]?.trim();
   if (envPath && envPath.length > 0) {
     return resolveExecutablePath(envPath);
+  }
+  const systemPath = await resolveExecutablePath("codex");
+  if (isAbsolutePath(systemPath)) {
+    return systemPath;
   }
   return null;
 }
@@ -803,6 +811,7 @@ function toolError(error: unknown): CallToolResult {
 function buildClaudeSummonPrompt(): string {
   const lines = [
     "You are a Claude agent summoned to the Agents Council.",
+    OBJECTIVE_CONSENSUS_DIRECTIVE,
     "Use the council tools to join the active session, review the request and prior feedback, then send a single response.",
     "Tools: mcp__council__join_council, mcp__council__get_current_session_data, mcp__council__send_response.",
     "Steps:",
@@ -817,6 +826,7 @@ function buildClaudeSummonPrompt(): string {
 function buildCodexSummonPrompt(request: CouncilRequest, feedback: CouncilFeedback[]): string {
   const lines = [
     "You are a Codex agent summoned to the Agents Council.",
+    OBJECTIVE_CONSENSUS_DIRECTIVE,
     "Review the council request and prior feedback, then provide a single response.",
     "",
     `Council request (from ${request.createdBy}):`,

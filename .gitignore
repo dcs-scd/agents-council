@@ -3,6 +3,15 @@ dist/
 tmp/
 .DS_Store
 
+# HALO-X run state / capture artifacts (generated)
+.halo-x/
+
+# Council deliberation transcripts (generated at runtime)
+deliberations/
+
+# Local Claude Code session state (handoffs, jobs) — never tracked
+.claude/
+
 
 # Ignore all files in the .idea folder
 .idea/

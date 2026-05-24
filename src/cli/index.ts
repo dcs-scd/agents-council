@@ -2,6 +2,7 @@ import path from "node:path";
 
 import { Command } from "commander";
 
+import { formatModelCouncilMarkdown, runModelCouncil, saveModelCouncilRun } from "../core/services/modelCouncil";
 import { startMcpServer } from "../interfaces/mcp/server";
 import { launchDesktopApp } from "./desktopLauncher";
 
@@ -43,6 +44,32 @@ const main = async (): Promise<void> => {
         await launchDesktopApp({ source: "chat" });
       } catch (error) {
         reportAndExit("Failed to launch desktop interface", error);
+      }
+    });
+
+  program
+    .command("solve")
+    .description("Run the configured multi-agent model council and print the peer-ratified consensus result.")
+    .argument("<prompt...>", "Problem or question for the council")
+    .option("--json", "Print the full structured council result as JSON.")
+    .action(async (promptParts: string[], options: { json?: boolean }) => {
+      try {
+        const result = await runModelCouncil({ prompt: promptParts.join(" ") });
+        try {
+          const saved = await saveModelCouncilRun(result);
+          console.error(`Saved deliberation record to ${saved.jsonPath}`);
+          console.error(`Saved Markdown answer to ${saved.markdownPath}`);
+        } catch (saveError) {
+          const detail = saveError instanceof Error ? saveError.message : String(saveError);
+          console.error(`Warning: failed to save deliberation record: ${detail}`);
+        }
+        if (options.json) {
+          console.log(JSON.stringify(result, null, 2));
+          return;
+        }
+        console.log(formatModelCouncilMarkdown(result));
+      } catch (error) {
+        reportAndExit("Failed to run model council", error);
       }
     });
 

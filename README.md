@@ -244,6 +244,25 @@ These settings are optional. By default, Agents Council uses the bundled Codex C
 - `send_response`: Submit feedback to a specific `session_id`.
 - `close_council`: End a specific `session_id` with a conclusion.
 - `summon_agent`: Summon Claude or Codex into the current council.
+- `run_model_council`: Ask Kimi 2.6, DeepSeek V4 Pro, and ChatGPT 5.5 Pro to propose, deliberate, and independently ratify or block consensus.
+
+### Three-Agent Model Council
+
+Run Kimi 2.6 and DeepSeek V4 Pro through OpenRouter, with ChatGPT 5.5 Pro through your locally authenticated Codex/OpenAI subscription path. The agents iterate on a candidate consensus until it stabilizes, then each agent independently ratifies or blocks it:
+
+```bash
+export OPENROUTER_API_KEY="..."
+codex login
+council solve "Decide the best architecture for ..."
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `OPENROUTER_API_KEY` | required | OpenRouter API key for Kimi and DeepSeek |
+| `OPENROUTER_HTTP_REFERER` | (unset) | Optional OpenRouter referer header |
+| `AGENTS_COUNCIL_KIMI_MODEL` | `moonshotai/kimi-k2.6` | OpenRouter Kimi model ID |
+| `AGENTS_COUNCIL_DEEPSEEK_MODEL` | `deepseek/deepseek-v4-pro` | OpenRouter DeepSeek model ID |
+| `AGENTS_COUNCIL_CHATGPT_MODEL` | `gpt-5.5-pro` | Codex/OpenAI subscription model name |
 
 ---
 
