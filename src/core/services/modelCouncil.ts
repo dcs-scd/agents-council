@@ -4,17 +4,27 @@ import path from "node:path";
 import { Codex } from "@openai/codex-sdk";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
-import { getClaudeCodeExecutablePath, getCodexExecutablePath } from "./council/summon";
+import { getClaudeCodeExecutablePath, getCodexExecutablePath, getGeminiExecutablePath } from "./council/summon";
 import { OBJECTIVE_CONSENSUS_DIRECTIVE } from "./council/objectiveConsensusPrompt";
 import { resolveDeliberationsDir } from "../state/path";
 
 const OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_KIMI_MODEL = "moonshotai/kimi-k2.6";
 const DEFAULT_DEEPSEEK_MODEL = "deepseek/deepseek-v4-pro";
-const DEFAULT_GEMINI_MODEL = "google/gemini-3.5-flash";
+// Gemini moved off OpenRouter to the official `@google/gemini-cli` (Google's
+// open-source CLI authenticated via `gemini auth login` against the user's
+// Google account — the same subscription path Claude/Codex use through their
+// own CLIs). Slug is plain (no provider prefix); override via
+// AGENTS_COUNCIL_GEMINI_MODEL if Google's actual model id differs.
+const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash";
 const DEFAULT_CHATGPT_MODEL = "gpt-5.5";
 const DEFAULT_CHATGPT_REASONING_EFFORT = "xhigh" as const;
 const DEFAULT_CLAUDE_MODEL = "claude-opus-4-7";
+const MEMBERS_ENV = "AGENTS_COUNCIL_MEMBERS";
+const OPENROUTER_TIMEOUT_ENV = "AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS";
+const OPENROUTER_URL_ENV = "AGENTS_COUNCIL_OPENROUTER_URL";
+const DEFAULT_OPENROUTER_TIMEOUT_MS = 300_000;
+const MIN_OPENROUTER_TIMEOUT_MS = 50;
 // Maximum deliberation rounds before the council stops looping. Overridable via
 // AGENTS_COUNCIL_MAX_ROUNDS. Raised from 4 to 6 because runs were hitting the cap
 // while still actively converging (see the convergence trajectory in the result).
@@ -22,18 +32,37 @@ const DEFAULT_MAX_CONSENSUS_ROUNDS = 6;
 // Near-convergence threshold: when a round's shared candidate is at least this
 // token-similar to the previous round's, treat it as converged and proceed to
 // ratification instead of looping until the drafts are byte-identical (which
-// verbose models effectively never reach).
+// verbose models effectively never reach). Overridable via
+// AGENTS_COUNCIL_CONVERGENCE_SIMILARITY_THRESHOLD.
 const DEFAULT_CONVERGENCE_SIMILARITY_THRESHOLD = 0.95;
+// Member-agreement convergence threshold: independent reasoners producing
+// substantively identical answers in different prose typically score 0.7–0.9 on
+// pairwise token-set Jaccard. 0.95 between consecutive round drafts is too strict
+// for free-form prose and was the root cause of councils never converging despite
+// unanimous substantive agreement. Overridable via
+// AGENTS_COUNCIL_CONVERGENCE_AGREEMENT_THRESHOLD. Set to 1.0 to disable this arm.
+const DEFAULT_CONVERGENCE_AGREEMENT_THRESHOLD = 0.8;
 
 export type ModelCouncilMember = {
   id: "kimi" | "deepseek" | "gemini" | "chatgpt" | "claude";
   name: string;
-  provider: "openrouter" | "codex" | "claude";
+  provider: "openrouter" | "gemini" | "codex" | "claude";
   model: string;
 };
 
+// A minimal, serialization-safe projection of ModelCouncilMember for use in
+// per-turn records (responses, deliberations, ratifications). Keeping this
+// narrow ensures (a) JSON output isn't bloated with id/provider on every turn
+// and (b) future additions to ModelCouncilMember (e.g. provider config, header
+// hints) cannot accidentally leak into every saved deliberation file.
+export type MemberRef = Pick<ModelCouncilMember, "name" | "model">;
+
+function toMemberRef(member: ModelCouncilMember): MemberRef {
+  return { name: member.name, model: member.model };
+}
+
 export type ModelCouncilResponse = {
-  member: ModelCouncilMember;
+  member: MemberRef;
   content: string;
 };
 
@@ -58,10 +87,23 @@ export type ModelCouncilRatification = ModelCouncilResponse & {
   accepted: boolean;
 };
 
+// Three-state outcome of the ratify phase:
+//   "ratified"      — every member voted ACCEPT; consensus reached.
+//   "blocked"       — ratify ran and at least one member voted REJECT.
+//   "not_attempted" — convergence was never detected, so ratify never ran.
+// The previous shape (boolean `reached` + `blockedBy: string[]`) overloaded
+// `blockedBy` to mean both "voted REJECT" (converged path) and "never voted"
+// (non-converged path), which silently lied to callers about why consensus
+// failed. With this field the two cases are distinguishable.
+export type ModelCouncilConsensusOutcome = "ratified" | "blocked" | "not_attempted";
+
 export type ModelCouncilConsensus = {
   reached: boolean;
+  outcome: ModelCouncilConsensusOutcome;
   ratifiedBy: string[];
   blockedBy: string[];
+  // Optional human-facing reason for non-ratification. Machines key off `outcome`.
+  notRatifiedReason?: string;
 };
 
 export type ModelCouncilResult = {
@@ -78,6 +120,14 @@ export type ModelCouncilResult = {
 
 export type RunModelCouncilInput = {
   prompt: string;
+};
+
+export type ModelCouncilFailure = {
+  schema_version: "agents-council.model_council_failure.v1";
+  generatedAt: string;
+  prompt: string;
+  error: string;
+  members: ModelCouncilMember[];
 };
 
 // A content part lets us mark a stable prefix with cache_control so OpenRouter
@@ -164,7 +214,7 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
 
   const responses = await Promise.all(
     members.map(async (member) => ({
-      member,
+      member: toMemberRef(member),
       content: await askMember(member, buildProposalMessages(prompt, member)),
     })),
   );
@@ -182,7 +232,7 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
           buildDeliberationMessages(prompt, responses, previousProposals, candidateConsensus, member, index),
         );
         return {
-          member,
+          member: toMemberRef(member),
           content,
           candidateConsensus: parseCandidateConsensus(content),
         };
@@ -222,7 +272,7 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
             buildRatificationMessages(prompt, rounds, candidateConsensus, member),
           );
           return {
-            member,
+            member: toMemberRef(member),
             content,
             accepted: parseRatificationAccepted(content),
           };
@@ -303,6 +353,7 @@ export function formatModelCouncilMarkdown(result: ModelCouncilResult): string {
     `- Deliberation rounds: ${result.rounds.length}`,
     `- Candidate converged: ${result.converged ? "yes" : "no"}`,
     `- Peer ratifications: ${result.ratifications.length}`,
+    `- Outcome: ${result.consensus.outcome}${result.consensus.notRatifiedReason ? ` (${result.consensus.notRatifiedReason})` : ""}`,
     `- Accepted by: ${result.consensus.ratifiedBy.join(", ") || "none"}`,
     `- Blocked by: ${result.consensus.blockedBy.join(", ") || "none"}`,
     "",
@@ -363,17 +414,64 @@ export async function saveModelCouncilRun(
   return { jsonPath, markdownPath };
 }
 
+export async function saveModelCouncilFailure(input: { prompt: string; error: string }): Promise<{
+  jsonPath: string;
+  markdownPath: string;
+}> {
+  const deliberationsDir = resolveDeliberationsDir();
+  await mkdir(deliberationsDir, { recursive: true });
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const jsonPath = path.join(deliberationsDir, `council-failed-${timestamp}.json`);
+  const markdownPath = path.join(deliberationsDir, `council-failed-${timestamp}.md`);
+  const failure: ModelCouncilFailure = {
+    schema_version: "agents-council.model_council_failure.v1",
+    generatedAt: new Date().toISOString(),
+    prompt: input.prompt,
+    error: input.error,
+    members: buildDefaultMembers(),
+  };
+  await writeFile(jsonPath, `${JSON.stringify(failure, null, 2)}\n`, "utf8");
+  await writeFile(markdownPath, formatModelCouncilFailureMarkdown(failure), "utf8");
+  return { jsonPath, markdownPath };
+}
+
+function formatModelCouncilFailureMarkdown(failure: ModelCouncilFailure): string {
+  return [
+    "# Council Failed",
+    "",
+    `_Generated ${failure.generatedAt}_`,
+    "",
+    "The council did not complete. This is a failure transcript, not a consensus result.",
+    "",
+    "## Error",
+    "",
+    failure.error,
+    "",
+    "## Members",
+    "",
+    ...failure.members.map((member) => `- **${member.name}** — \`${member.model}\` (${member.provider})`),
+    "",
+    "## Question",
+    "",
+    failure.prompt || "(none)",
+    "",
+  ].join("\n");
+}
+
 function validateCouncilConfig(members: ModelCouncilMember[]): void {
   if (members.some((member) => member.provider === "openrouter") && !readEnv("OPENROUTER_API_KEY")) {
-    throw new Error("OPENROUTER_API_KEY is required for Kimi and DeepSeek council members.");
+    throw new Error("OPENROUTER_API_KEY is required for the Kimi and DeepSeek council members.");
   }
+  // Gemini CLI presence is checked lazily inside askGemini — the executable
+  // resolution mirrors getCodexExecutablePath() and lets the error fire with
+  // install instructions only when a Gemini member actually runs.
 }
 
 export function buildDefaultMembers(): ModelCouncilMember[] {
-  return [
+  const members: ModelCouncilMember[] = [
     {
       id: "kimi",
-      name: "Kimi 2.6",
+      name: "Kimi K2.6",
       provider: "openrouter",
       model: readEnv("AGENTS_COUNCIL_KIMI_MODEL") ?? DEFAULT_KIMI_MODEL,
     },
@@ -386,7 +484,7 @@ export function buildDefaultMembers(): ModelCouncilMember[] {
     {
       id: "gemini",
       name: "Gemini 3.5 Flash",
-      provider: "openrouter",
+      provider: "gemini",
       model: readEnv("AGENTS_COUNCIL_GEMINI_MODEL") ?? DEFAULT_GEMINI_MODEL,
     },
     {
@@ -402,11 +500,36 @@ export function buildDefaultMembers(): ModelCouncilMember[] {
       model: readEnv("AGENTS_COUNCIL_CLAUDE_MODEL") ?? DEFAULT_CLAUDE_MODEL,
     },
   ];
+  return selectConfiguredMembers(members);
+}
+
+function selectConfiguredMembers(members: ModelCouncilMember[]): ModelCouncilMember[] {
+  const raw = readEnv(MEMBERS_ENV);
+  if (!raw) {
+    return members;
+  }
+  const requested = raw
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+  if (requested.length === 0) {
+    return members;
+  }
+  const selected = members.filter(
+    (member) => requested.includes(member.id) || requested.includes(member.name.toLowerCase()),
+  );
+  if (selected.length === 0) {
+    throw new Error(`${MEMBERS_ENV} did not match any council members: ${raw}`);
+  }
+  return selected;
 }
 
 async function askMember(member: ModelCouncilMember, messages: ChatMessage[]): Promise<string> {
   if (member.provider === "openrouter") {
     return askOpenRouter(member, messages);
+  }
+  if (member.provider === "gemini") {
+    return askGemini(member, messages);
   }
   if (member.provider === "claude") {
     return askClaude(member, messages);
@@ -421,7 +544,7 @@ const OPENROUTER_MAX_ATTEMPTS = 3;
 async function askOpenRouter(member: ModelCouncilMember, messages: ChatMessage[]): Promise<string> {
   const apiKey = readEnv("OPENROUTER_API_KEY");
   if (!apiKey) {
-    throw new Error("OPENROUTER_API_KEY is required for the OpenRouter council members (Kimi, DeepSeek, Gemini).");
+    throw new Error("OPENROUTER_API_KEY is required for the OpenRouter council members (Kimi, DeepSeek).");
   }
 
   const headers: Record<string, string> = {
@@ -434,17 +557,34 @@ async function askOpenRouter(member: ModelCouncilMember, messages: ChatMessage[]
     headers["HTTP-Referer"] = referer;
   }
   const requestBody = JSON.stringify({ model: member.model, messages });
+  const timeoutMs = resolveOpenRouterTimeoutMs();
+  const url = readEnv(OPENROUTER_URL_ENV) ?? OPENROUTER_CHAT_COMPLETIONS_URL;
 
   let lastReason = "no content/reasoning returned";
   for (let attempt = 1; attempt <= OPENROUTER_MAX_ATTEMPTS; attempt++) {
-    const response = await fetch(OPENROUTER_CHAT_COMPLETIONS_URL, {
-      method: "POST",
-      headers,
-      body: requestBody,
-    });
+    let response: Response;
+    let rawText: string;
+    try {
+      ({ response, rawText } = await fetchTextWithTimeout(
+        url,
+        {
+          method: "POST",
+          headers,
+          body: requestBody,
+        },
+        timeoutMs,
+      ));
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      lastReason = detail;
+      if (attempt < OPENROUTER_MAX_ATTEMPTS) {
+        await delay(attempt * 500);
+        continue;
+      }
+      throw new Error(`${member.name} OpenRouter request failed after ${OPENROUTER_MAX_ATTEMPTS} attempts: ${detail}`);
+    }
 
     // Read the raw text first so an empty / non-JSON body stays diagnosable.
-    const rawText = await response.text();
     let body: OpenRouterResponse | null = null;
     try {
       body = rawText ? (JSON.parse(rawText) as OpenRouterResponse) : null;
@@ -486,6 +626,169 @@ async function askOpenRouter(member: ModelCouncilMember, messages: ChatMessage[]
 
   // The loop always returns or throws above; this satisfies the type checker.
   throw new Error(`${member.name} OpenRouter request failed (${lastReason}).`);
+}
+
+// Bun 1.3.11's fetch() hangs on long-running OpenRouter responses to reasoning
+// models (Kimi K2.6 etc.) — the Promise never resolves even though headers
+// arrive within ~2s. Diagnosed 2026-05-28: same body via curl from the same
+// Bun process completes in ~150s; Bun fetch hangs past 300s. Until Bun's HTTP
+// client fixes this, route OpenRouter calls through curl. Inputs/outputs match
+// the original fetch wrapper exactly so the caller (askOpenRouter) is unchanged.
+async function fetchTextWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<{ response: Response; rawText: string }> {
+  const STATUS_SENTINEL = "\n__BUN_CURL_HTTP_STATUS__:";
+  const headerArgs: string[] = [];
+  const headersInit = init.headers as Record<string, string> | undefined;
+  if (headersInit) {
+    for (const [key, value] of Object.entries(headersInit)) {
+      headerArgs.push("-H", `${key}: ${value}`);
+    }
+  }
+  const method = (init.method ?? "GET").toUpperCase();
+  const body = typeof init.body === "string" ? init.body : null;
+  const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
+
+  const args = [
+    "-sS",
+    "-X",
+    method,
+    "--max-time",
+    String(timeoutSeconds),
+    ...headerArgs,
+    ...(body !== null ? ["--data-binary", "@-"] : []),
+    "--write-out",
+    `${STATUS_SENTINEL}%{http_code}`,
+    url,
+  ];
+
+  const proc = Bun.spawn(["curl", ...args], {
+    stdin: body !== null ? "pipe" : "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  if (body !== null && proc.stdin) {
+    // proc.stdin is a Bun FileSink (write+end), not a WHATWG WritableStream.
+    const sink = proc.stdin;
+    sink.write(body);
+    sink.end();
+  }
+
+  const [stdoutText, stderrText, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+
+  if (exitCode === 28) {
+    // curl exit code 28 = operation timed out
+    throw new Error(`timed out after ${timeoutMs}ms before complete response body`);
+  }
+  if (exitCode !== 0) {
+    const stderrSnippet = stderrText.trim().slice(0, 300) || "no stderr output";
+    throw new Error(`curl failed (exit ${exitCode}): ${stderrSnippet}`);
+  }
+
+  const sentinelIndex = stdoutText.lastIndexOf(STATUS_SENTINEL);
+  if (sentinelIndex < 0) {
+    const tail = stdoutText.slice(-200);
+    throw new Error(`curl response missing status trailer; tail="${tail}"`);
+  }
+  const statusText = stdoutText.slice(sentinelIndex + STATUS_SENTINEL.length).trim();
+  const status = Number.parseInt(statusText, 10);
+  if (!Number.isFinite(status)) {
+    throw new Error(`curl returned non-numeric HTTP status: "${statusText}"`);
+  }
+  const rawText = stdoutText.slice(0, sentinelIndex);
+
+  // askOpenRouter only reads .ok, .status, and .statusText off the Response.
+  // Construct a minimal duck-typed object rather than `new Response(rawText,
+  // { status })` because the WHATWG Response constructor restricts status to
+  // [200, 599] and rejects e.g. 100/600+ which OpenRouter could theoretically
+  // surface from an upstream proxy.
+  const response = {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: "",
+  } as Response;
+
+  return { response, rawText };
+}
+
+export function resolveOpenRouterTimeoutMs(): number {
+  const raw = readEnv(OPENROUTER_TIMEOUT_ENV);
+  if (!raw) {
+    return DEFAULT_OPENROUTER_TIMEOUT_MS;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < MIN_OPENROUTER_TIMEOUT_MS) {
+    return DEFAULT_OPENROUTER_TIMEOUT_MS;
+  }
+  return parsed;
+}
+
+const GEMINI_MAX_ATTEMPTS = 3;
+
+async function askGemini(member: ModelCouncilMember, messages: ChatMessage[]): Promise<string> {
+  const geminiPath = await getGeminiExecutablePath();
+  if (!geminiPath) {
+    throw new Error(
+      `${member.name}: gemini CLI not found. Install the official Google Gemini CLI ` +
+        "with `npm install -g @google/gemini-cli`, then run `gemini auth login` once to " +
+        "authenticate with the Google account that owns your Gemini / Google AI Pro subscription. " +
+        "Override the resolved binary with the GEMINI_PATH env var if it lives elsewhere.",
+    );
+  }
+
+  // The Gemini CLI takes a plain prompt (no OpenAI-style chat-message array),
+  // so we collapse the multi-turn exchange the same way askCodex does, with
+  // explicit role markers. cache_control hints in ChatContentPart[] are
+  // discarded — Google's context-caching lives in a separate `cachedContents`
+  // API not exposed through the CLI, and per-deliberation rounds would not
+  // amortize the setup cost. The prompt is piped via stdin to avoid ARG_MAX
+  // truncation on large file-inlined deliberations from council-solve.ts.
+  const prompt = messages
+    .map((message) => `${message.role.toUpperCase()}: ${flattenMessageContent(message.content)}`)
+    .join("\n\n");
+
+  let lastReason = "no output";
+  for (let attempt = 1; attempt <= GEMINI_MAX_ATTEMPTS; attempt++) {
+    const proc = Bun.spawn([geminiPath, "-m", member.model], {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    proc.stdin.write(prompt);
+    await proc.stdin.end();
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    if (exitCode === 0) {
+      const content = stdout.trim();
+      if (content) {
+        return content;
+      }
+      lastReason = "exit 0 with empty stdout";
+    } else {
+      const stderrSnippet = stderr.trim().slice(0, 500);
+      lastReason = `exit ${exitCode}${stderrSnippet ? `: ${stderrSnippet}` : ""}`;
+    }
+
+    if (attempt < GEMINI_MAX_ATTEMPTS) {
+      await delay(attempt * 500);
+      continue;
+    }
+    throw new Error(`${member.name} Gemini CLI failed after ${GEMINI_MAX_ATTEMPTS} attempts: ${lastReason}`);
+  }
+
+  // The loop always returns or throws above; this satisfies the type checker.
+  throw new Error(`${member.name} Gemini CLI failed (${lastReason}).`);
 }
 
 async function askCodex(member: ModelCouncilMember, messages: ChatMessage[]): Promise<string> {
@@ -724,15 +1027,31 @@ function normalizeCandidate(candidate: string): string {
   return candidate.trim().replace(/\s+/g, " ");
 }
 
-// A round is converged once its shared candidate is either byte-identical to the
-// previous round's (changed === false) or near-identical (token similarity at or
-// above the threshold). The near-convergence arm lets the council ratify a draft
-// that has effectively stabilized instead of looping until it stops changing.
+// A round is converged once any of three arms fire:
+//   1. byte-identical to the previous round's shared candidate (changed === false);
+//   2. the shared candidate is near-identical between rounds (similarityToPrevious
+//      ≥ DEFAULT_CONVERGENCE_SIMILARITY_THRESHOLD) — fast-path for verbose models
+//      that effectively never produce byte-identical drafts;
+//   3. the members' own candidate drafts agree with each other within this round
+//      (memberAgreement ≥ DEFAULT_CONVERGENCE_AGREEMENT_THRESHOLD) — measures the
+//      thing we actually care about ("do the members agree?"), which the previous
+//      sim-only criterion did not directly capture.
+// Either of (2) or (3) firing means convergence; this is a strict superset of the
+// previous behavior. See council_output_shape_bugs_proposal.md (Bug 3) for why
+// the sim-only arm was insufficient.
 function isConverged(round: ModelCouncilRound): boolean {
   if (!round.changed) {
     return true;
   }
-  return round.similarityToPrevious !== null && round.similarityToPrevious >= DEFAULT_CONVERGENCE_SIMILARITY_THRESHOLD;
+  const simThreshold = resolveConvergenceSimilarityThreshold();
+  if (round.similarityToPrevious !== null && round.similarityToPrevious >= simThreshold) {
+    return true;
+  }
+  const agreementThreshold = resolveConvergenceAgreementThreshold();
+  if (Number.isFinite(round.memberAgreement) && round.memberAgreement >= agreementThreshold) {
+    return true;
+  }
+  return false;
 }
 
 function resolveMaxRounds(): number {
@@ -744,6 +1063,27 @@ function resolveMaxRounds(): number {
     }
   }
   return DEFAULT_MAX_CONSENSUS_ROUNDS;
+}
+
+function resolveConvergenceSimilarityThreshold(): number {
+  return resolveUnitFloatEnv(
+    "AGENTS_COUNCIL_CONVERGENCE_SIMILARITY_THRESHOLD",
+    DEFAULT_CONVERGENCE_SIMILARITY_THRESHOLD,
+  );
+}
+
+function resolveConvergenceAgreementThreshold(): number {
+  return resolveUnitFloatEnv("AGENTS_COUNCIL_CONVERGENCE_AGREEMENT_THRESHOLD", DEFAULT_CONVERGENCE_AGREEMENT_THRESHOLD);
+}
+
+// Parse a float env var clamped to [0, 1]; falls back to the default on missing,
+// non-numeric, or out-of-range values. Used for both convergence threshold knobs.
+function resolveUnitFloatEnv(envName: string, fallback: number): number {
+  const raw = readEnv(envName);
+  if (!raw) return fallback;
+  const parsed = Number.parseFloat(raw);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) return fallback;
+  return parsed;
 }
 
 // Token-set Jaccard similarity in [0, 1]. Used to quantify how much the shared
@@ -786,14 +1126,19 @@ function averagePairwiseSimilarity(texts: string[]): number {
 
 function buildConsensusResult(
   ratifications: ModelCouncilRatification[],
-  members: ModelCouncilMember[],
+  _members: ModelCouncilMember[],
   converged: boolean,
 ): ModelCouncilConsensus {
   if (!converged) {
+    // Ratify never ran; no member actually voted. Returning the full member
+    // list under `blockedBy` (as the prior implementation did) was a lie —
+    // it made non-convergence indistinguishable from unanimous rejection.
     return {
       reached: false,
+      outcome: "not_attempted",
       ratifiedBy: [],
-      blockedBy: members.map((member) => member.name),
+      blockedBy: [],
+      notRatifiedReason: "no candidate consensus emerged before max rounds",
     };
   }
   const ratifiedBy = ratifications
@@ -802,8 +1147,10 @@ function buildConsensusResult(
   const blockedBy = ratifications
     .filter((ratification) => !ratification.accepted)
     .map((ratification) => ratification.member.name);
+  const reached = blockedBy.length === 0 && ratifiedBy.length === ratifications.length;
   return {
-    reached: blockedBy.length === 0 && ratifiedBy.length === ratifications.length,
+    reached,
+    outcome: reached ? "ratified" : "blocked",
     ratifiedBy,
     blockedBy,
   };

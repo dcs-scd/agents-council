@@ -5,9 +5,13 @@ import path from "node:path";
 
 import {
   buildDeliberationMessages,
+  buildDefaultMembers,
   buildProposalMessages,
   buildRatificationMessages,
   flattenMessageContent,
+  resolveOpenRouterTimeoutMs,
+  runModelCouncil,
+  saveModelCouncilFailure,
   type ModelCouncilCandidateProposal,
   type ModelCouncilMember,
   type ModelCouncilResponse,
@@ -19,7 +23,7 @@ import {
 const members: ModelCouncilMember[] = [
   {
     id: "kimi",
-    name: "Kimi 2.6",
+    name: "Kimi K2.6",
     provider: "openrouter",
     model: "kimi-test",
   },
@@ -74,6 +78,81 @@ const rounds: ModelCouncilRound[] = [
 ];
 
 describe("model council prompt protocol", () => {
+  test("member selection can limit council to OpenRouter reviewers", () => {
+    const previous = process.env.AGENTS_COUNCIL_MEMBERS;
+    process.env.AGENTS_COUNCIL_MEMBERS = "kimi,deepseek";
+
+    try {
+      expect(buildDefaultMembers().map((member) => member.id)).toEqual(["kimi", "deepseek"]);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.AGENTS_COUNCIL_MEMBERS;
+      } else {
+        process.env.AGENTS_COUNCIL_MEMBERS = previous;
+      }
+    }
+  });
+
+  test("OpenRouter requests time out instead of hanging indefinitely", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => new Promise<Response>(() => {}),
+    });
+    const previousMembers = process.env.AGENTS_COUNCIL_MEMBERS;
+    const previousKey = process.env.OPENROUTER_API_KEY;
+    const previousUrl = process.env.AGENTS_COUNCIL_OPENROUTER_URL;
+    const previousTimeout = process.env.AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS;
+
+    process.env.AGENTS_COUNCIL_MEMBERS = "kimi";
+    process.env.OPENROUTER_API_KEY = "test-key";
+    process.env.AGENTS_COUNCIL_OPENROUTER_URL = server.url.toString();
+    process.env.AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS = "50";
+
+    try {
+      expect(resolveOpenRouterTimeoutMs()).toBe(50);
+      await expect(runModelCouncil({ prompt: "timeout smoke" })).rejects.toThrow(/timed out after 50ms/);
+    } finally {
+      server.stop(true);
+      restoreEnv("AGENTS_COUNCIL_MEMBERS", previousMembers);
+      restoreEnv("OPENROUTER_API_KEY", previousKey);
+      restoreEnv("AGENTS_COUNCIL_OPENROUTER_URL", previousUrl);
+      restoreEnv("AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS", previousTimeout);
+    }
+  });
+
+  test("OpenRouter response body read is covered by the same timeout", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch: () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode("{"));
+            },
+          }),
+        ),
+    });
+    const previousMembers = process.env.AGENTS_COUNCIL_MEMBERS;
+    const previousKey = process.env.OPENROUTER_API_KEY;
+    const previousUrl = process.env.AGENTS_COUNCIL_OPENROUTER_URL;
+    const previousTimeout = process.env.AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS;
+
+    process.env.AGENTS_COUNCIL_MEMBERS = "kimi";
+    process.env.OPENROUTER_API_KEY = "test-key";
+    process.env.AGENTS_COUNCIL_OPENROUTER_URL = server.url.toString();
+    process.env.AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS = "50";
+
+    try {
+      await expect(runModelCouncil({ prompt: "body timeout smoke" })).rejects.toThrow(/complete response body/);
+    } finally {
+      server.stop(true);
+      restoreEnv("AGENTS_COUNCIL_MEMBERS", previousMembers);
+      restoreEnv("OPENROUTER_API_KEY", previousKey);
+      restoreEnv("AGENTS_COUNCIL_OPENROUTER_URL", previousUrl);
+      restoreEnv("AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS", previousTimeout);
+    }
+  });
+
   test("initial proposal prompt stresses objective independent reasoning", () => {
     const messages = buildProposalMessages("Pick an architecture", members[0]!);
     const system = messages[0]?.content ?? "";
@@ -96,7 +175,7 @@ describe("model council prompt protocol", () => {
     // Round 1 carries the initial independent proposals.
     expect(r1User).toContain("deliberation round 1");
     expect(r1User).toContain("Initial council proposals");
-    expect(r1User).toContain("Kimi 2.6 proposal");
+    expect(r1User).toContain("Kimi K2.6 proposal");
 
     const round2 = buildDeliberationMessages(
       "Pick an architecture",
@@ -160,6 +239,7 @@ describe("model council persistence", () => {
         ratifications: [],
         consensus: {
           reached: true,
+          outcome: "ratified",
           ratifiedBy: members.map((member) => member.name),
           blockedBy: [],
         },
@@ -195,4 +275,41 @@ describe("model council persistence", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  test("saveModelCouncilFailure writes a transcript when the council aborts before consensus", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "council-failed-"));
+    const previousDir = process.env.AGENTS_COUNCIL_DELIBERATIONS_DIR;
+    const previousMembers = process.env.AGENTS_COUNCIL_MEMBERS;
+    process.env.AGENTS_COUNCIL_DELIBERATIONS_DIR = dir;
+    process.env.AGENTS_COUNCIL_MEMBERS = "kimi,deepseek";
+
+    try {
+      const { jsonPath, markdownPath } = await saveModelCouncilFailure({
+        prompt: "Review WU-008",
+        error: "Kimi K2.6 OpenRouter request failed after 3 attempts: timed out after 50ms",
+      });
+
+      const written = JSON.parse(await readFile(jsonPath, "utf8"));
+      expect(written.schema_version).toBe("agents-council.model_council_failure.v1");
+      expect(written.error).toContain("timed out after 50ms");
+      expect(written.members.map((member: ModelCouncilMember) => member.id)).toEqual(["kimi", "deepseek"]);
+
+      const markdown = await readFile(markdownPath, "utf8");
+      expect(markdown).toContain("# Council Failed");
+      expect(markdown).toContain("not a consensus result");
+      expect(markdown).toContain("Review WU-008");
+    } finally {
+      restoreEnv("AGENTS_COUNCIL_DELIBERATIONS_DIR", previousDir);
+      restoreEnv("AGENTS_COUNCIL_MEMBERS", previousMembers);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
+}
