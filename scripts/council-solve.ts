@@ -31,7 +31,12 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
-import { formatModelCouncilMarkdown, runModelCouncil, saveModelCouncilRun } from "../src/core/services/modelCouncil";
+import {
+  formatModelCouncilMarkdown,
+  runModelCouncil,
+  saveModelCouncilFailure,
+  saveModelCouncilRun,
+} from "../src/core/services/modelCouncil";
 
 const DEFAULT_MAX_BYTES = 500_000;
 
@@ -276,7 +281,21 @@ const main = async (): Promise<void> => {
     );
   }
 
-  const result = await runModelCouncil({ prompt: text });
+  let result;
+  try {
+    result = await runModelCouncil({ prompt: text });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    try {
+      const saved = await saveModelCouncilFailure({ prompt: text, error: detail });
+      console.error(`Saved failed deliberation record to ${saved.jsonPath}`);
+      console.error(`Saved failed Markdown record to ${saved.markdownPath}`);
+    } catch (saveError) {
+      const saveDetail = saveError instanceof Error ? saveError.message : String(saveError);
+      console.error(`Warning: failed to save failed deliberation record: ${saveDetail}`);
+    }
+    throw error;
+  }
 
   try {
     const saved = await saveModelCouncilRun(result);

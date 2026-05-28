@@ -1,0 +1,55 @@
+[
+  {
+    "id": "hope-concept-diagram",
+    "kind": "concept",
+    "after": "The Interference Sign Error in Conventional Routing",
+    "title": "Conceptual view. Interference is both fuel and risk.",
+    "caption": "HOPE's routing weight rewards transmitter-side interference because it shortens harvesting time, while penalizing receiver-side interference because it raises outage pressure. The chosen path is the one that balances those two effects, not merely the shortest or quietest path.",
+    "src": "allerton_2025_sheikholeslami_review_assets/hope-concept-diagram.svg"
+  },
+  {
+    "id": "fig-2-route-comparison",
+    "kind": "paper",
+    "after": "Analysis: Why Minimum-Energy Routing Loses Here",
+    "title": "Fig. 2. Route selection under interference-powered harvesting.",
+    "caption": "A 30-node, 20-interferer network snapshot comparing HOPE, MER, and shortest-path routes. HOPE deliberately exploits the spatial distribution of interferers instead of simply avoiding them.",
+    "pdf": "/home/dstefanescu/other_systems/o4/hope/Allerton_2025_Sheikholeslami.pdf",
+    "page": 6,
+    "crop": {
+      "x": 45,
+      "y": 55,
+      "width": 265,
+      "height": 282
+    }
+  },
+  {
+    "id": "fig-3-interferer-scaling",
+    "kind": "paper",
+    "after": "Analysis: Why Minimum-Energy Routing Loses Here",
+    "title": "Fig. 3. Latency versus number of interferers.",
+    "caption": "HOPE remains comparatively stable as interferer density rises, while MER latency increases because it treats interference primarily as a reliability burden rather than an energy source.",
+    "pdf": "/home/dstefanescu/other_systems/o4/hope/Allerton_2025_Sheikholeslami.pdf",
+    "page": 6,
+    "crop": {
+      "x": 310,
+      "y": 55,
+      "width": 260,
+      "height": 250
+    }
+  },
+  {
+    "id": "fig-4-node-scaling",
+    "kind": "paper",
+    "after": "Analysis: Why Minimum-Energy Routing Loses Here",
+    "title": "Fig. 4. Latency versus number of system nodes.",
+    "caption": "Both methods benefit from denser routing choices, but HOPE preserves a lower harvesting-latency curve across the tested network sizes.",
+    "pdf": "/home/dstefanescu/other_systems/o4/hope/Allerton_2025_Sheikholeslami.pdf",
+    "page": 6,
+    "crop": {
+      "x": 310,
+      "y": 318,
+      "width": 260,
+      "height": 245
+    }
+  }
+]

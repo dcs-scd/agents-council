@@ -1,0 +1,120 @@
+## Agent description (voice — read first, apply throughout the deliberation)
+
+You are a world-class expert across all domains, with the intellectual range, precision, and erudition of the smartest people alive. Give complete, specific, step-by-step answers, with reasoning shown where it matters. Verify your own work. Double-check facts, figures, citations, names, dates, examples. Never hallucinate; if you don't know, say so. Tone: precise, not strident, not pedantic. You may be provocative, aggressive, argumentative, pointed. Negative conclusions and bad news are fine. Not politically correct. No disclaimers. No unsolicited morals, ethics, or "important to consider" framing. Be complete and precise; do not pad. Depth comes from precision, not length. Long answers only when substance demands it, never as a default.
+
+Never praise the question or validate premises before answering. If the proposal is wrong, say so immediately. Lead with the strongest counterargument before any agreement. Banned phrases and variants: "great question," "you're absolutely right," "fascinating perspective." If a peer member pushes back, do not capitulate unless they supply new evidence or a superior argument — restate your position if your reasoning holds. Do not anchor on each other's numbers; generate your own independently. Use explicit confidence: high / moderate / low / unknown. Never apologize for disagreeing. Accuracy is your success metric, not consensus. Absent new evidence or a superior argument, hold your line.
+
+## Topic
+
+How do we get an agent to learn its harness?
+
+## Seed proposal (this is what you are reacting to — engage it, do not riff in the void)
+
+The user has authored a v0 proposal on this topic. Identify what the seed gets right, where it overreaches, where it is silent on load-bearing primitives, and what minimum set of changes would survive adversarial review by the four of you. Cite the seed by section number where useful.
+
+--- SEED START ---
+
+The answer is: **you do not get agents to "learn their harness" by giving them a longer harness description.** You get it by building a **harness-learning curriculum plus a trace-to-delta loop** where the agent repeatedly experiences harness-caused failure, diagnoses the harness mechanism, proposes a narrow harness change, sees the result, and then has the stable lesson distilled into reusable harness doctrine.
+
+Meta-Harness gives the outer substrate: raw traces, prior code, scores, and candidate history in a filesystem. Your v3 proposal correctly hardens that substrate with sandboxed immutability, split visibility, negative controls, trace-quality checks, and red/yellow/green safety zoning. But the missing piece is **pedagogy and credit assignment**: how to make the proposer learn which harness mechanisms matter, not merely mutate code until something scores higher.
+
+## 1. There are three different kinds of "learning the harness"
+
+Do not collapse these.
+
+### A. Harness-use learning
+The task agent learns how to use the harness it has been given. Examples: Use the environment snapshot before probing randomly. Use the retriever before asking the model to guess. Use the branch ledger before claiming progress. Use monitor output instead of rerunning expensive commands. Use acceptance gates as constraints, not as afterthoughts. This is mostly prompt/skill/curriculum learning.
+
+### B. Harness-design learning
+A proposer agent learns how to improve the harness itself. Examples: Add environment bootstrapping. Change context packing. Change memory retrieval. Change trace schema. Change work-unit decomposition. Change completion confirmation logic. Change rollback policy. This is the Meta-Harness layer: code-space search over harness variants.
+
+### C. Harness-doctrine learning
+The system distills stable discoveries into reusable rules, templates, tests, and skills. Examples: "Prefer additive environment snapshot over completion-flow edits." "Never optimize acceptance thresholds directly." "If repeated regressions share one prompt edit, isolate the confound." "Trace summaries are navigation aids only; raw traces remain source of truth." This is how the organization learns, not just one run.
+
+## 2. The core mechanism: harness learning requires causal contrast, not just score feedback
+
+A scalar score does not teach the agent the harness. A harness-learning trace says: candidate_A changed completion flow and prompt cleanup — regressed on tasks where cleanup removed required state. candidate_B kept prompt fixed and only added marker stripping — regressed less. candidate_C avoided completion flow entirely and added environment bootstrap — improved because it saved early exploration turns without touching fragile logic. The pattern: failure → contrastive diagnosis → isolated mechanism test → safer harness delta → promotion → distilled doctrine. The agent learns because the substrate gives it raw evidence to perform causal contrast.
+
+## 3. Build a Harness Learning Loop, not just a Meta-Harness loop
+
+Substrate: candidates/ runs/ frontier/ immutable/ negative_controls/ trace_quality_checks/ split_visibility.yaml. The Loop: 1) Expose harness map. 2) Run harness-specific curriculum tasks. 3) Capture raw traces and harness decision points. 4) Cluster failures by harness mechanism. 5) Force proposer to state a falsifiable harness hypothesis. 6) Require one-mechanism candidate edits. 7) Run ablations and negative controls. 8) Promote only frontier-safe candidates. 9) Distill stable lessons into skills/tests/templates. 10) Re-evaluate old frontier candidates after doctrine changes. Without explicit mechanism hypotheses and one-mechanism edits, agents do not learn the harness; they perform noisy code search.
+
+## 4. Give the agent a harness map
+
+Every domain should have a `harness_map.json` or `HARNESS_CARD.md` describing components, mutable_components, immutable_components, and known_failure_modes. Example for a hybrid retriever: query_parser, lexical_retriever, codegraph_retriever, merge_policy, dedup_policy, reranker, context_budgeter, trace_logger, evaluator. Mutable: merge/dedup/reranker/budgeter. Immutable: indexes, query_set, ground_truth, eval_script, metric_accounting. Without this map, the proposer infers harness architecture from source every time, wasting tokens and making learning unstable.
+
+## 5. Create harness-specific curriculum tasks
+
+Agents learn harnesses when the evaluation set contains failures where only a harness-level change can help. Hybrid retriever curriculum: right file appears only through symbol graph not lexical, lexical finds many decoys, dedup removes correct near-duplicate, graph expansion floods context with neighbors, query refers to behavior not symbol name, target file obvious but symbol not, correct result ranked 11–20 just below cutoff. HALO-X curriculum: agent completes visible tests but fails hidden architecture invariant, agent edits evaluator to pass, agent loses parent metric during decomposition, agent enters 40-tool-call rabbit hole, agent suppresses stderr and claims success, agent forgets MDOC update, agent does broad rewrite instead of targeted patch, agent passes acceptance but hydra finds HIGH/CRIT residual.
+
+## 6. Add a harness introspection API
+
+Tools at the right abstraction: `mh harness map`, `mh harness explain <component>`, `mh harness decision-trace <run> <task>`, `mh harness compare-decisions <run_a> <run_b>`, `mh harness failure-modes --cluster`, `mh harness ablate <candidate> --component <name>`, `mh harness blame <run> <task>`, `mh harness invariant-report <run>`. The key tool is `decision-trace`. For a retrieval miss: log query, lexical_candidates, graph_candidates, merge_policy_output, dedup_removed, reranker_scores, final_context, ground_truth_hit, miss_reason ("correct file retrieved by graph but removed by dedup"). For HALO-X: log task, parent_metric, plan, work_units, tool_calls, acceptance_claim, hidden_failure, false_completion, miss_reason ("acceptance skill checked tests but not invariant oracle").
+
+## 7. Require one-mechanism edits
+
+If a candidate changes five things, the agent does not learn which mechanism mattered. Each candidate declares mechanism_family, single_primary_change, expected_effect, expected_cost, non_changes. A good candidate: "Change only the dedup policy so graph candidates are not removed when lexical candidates share the same file but different symbol." A bad candidate: "Improve retrieval by changing merge, dedup, reranking, prompt, and budget." The second may score higher, but it teaches less.
+
+## 8. Use ablation as the learning teacher
+
+For every promising candidate, automatically run minimal ablations: candidate_full, candidate_without_component_A, candidate_without_component_B, candidate_with_old_prompt, candidate_with_old_dedup, candidate_with_old_budget. Then the run report says: "The improvement came from dedup, not reranking. The latency regression came from graph-hop expansion. The false-completion reduction came from acceptance invariant check, not planner wording." That is harness learning.
+
+## 9. Distill stable lessons into "harness doctrine"
+
+`doctrine/lessons/L0001_environment_bootstrap.md`, `L0004_dedup_can_delete_correct_symbol.md`, etc. Each carries evidence: positive_runs, ablations, failure_cluster pointers, status (promoted), scope (e.g. hybrid_retriever), do_not_generalize_to. Doctrines must be evidence-backed, scoped, testable; not vague prose.
+
+## 10. Build harness apprenticeships for agents
+
+Curated cases: Baseline harness behavior → Raw trace excerpt → Failure diagnosis → Candidate change → Ablation result → Final doctrine → What not to infer. Example (environment bootstrap): Failure — agent spends first 3 turns discovering files/tools. Bad fix — rewrite completion prompt to encourage faster action → regression. Good fix — additive environment snapshot before first turn → fewer exploration turns, lower regression risk. Doctrine — prefer additive information bootstrap over fragile control-flow edits when early exploration waste is the failure mode.
+
+## 11. Separate roles: the task agent should not be the only learner
+
+Four roles: (1) Task agent — runs under harness, solves tasks, learns how to use current affordances. (2) Proposer agent — reads traces and proposes harness changes; mutable: candidate harness only. (3) Evaluator agent/process — scores candidates, enforces invariants, runs negative controls; mutable: nothing in the candidate loop. (4) Distiller agent — turns stable findings into doctrine, tests, skill updates. The dangerous mistake is one agent that proposes, evaluates, judges, and updates doctrine — that collapses learning into self-justification.
+
+## 12. The actual algorithm
+
+```
+freeze_evaluator_epoch(domain)
+run_baselines(domain)
+for iteration in range(N):
+  evidence = expose_search_feedback(domain)
+  diagnosis = proposer.diagnose(harness_map, frontier, raw_traces, failure_clusters, current_doctrine)
+  assert diagnosis.cites_raw_artifacts()
+  assert diagnosis.identifies_one_mechanism()
+  candidate = proposer.write_candidate(mechanism, allowed_mutables, forbidden=immutables)
+  validate_interface; verify_sandbox; run_negative_control_detectors
+  search_result = evaluate; trace_quality = compute; branch_state = update
+  if survives_stage_3: selection_score = evaluate_selection_val(aggregate_only=True); update_frontier
+finalists = select_pareto_frontier
+for candidate in finalists: run_hidden_test_once; run_required_hydra_if_yellow; run_ablations
+promoted = promote_candidates
+lessons = distill_doctrine(promoted, ablations=True); add_doctrine_tests
+start_new_epoch_if_evaluator_or_doctrine_changes
+```
+
+The agent learns the harness because each iteration forces it to connect: raw trace → failure mechanism → single harness change → ablation → doctrine.
+
+## 13. What to implement in MH-o4-v0
+
+Required for v0: harness_map.json, decision_trace.jsonl, failure_cluster.json, candidate_hypothesis.json, single_mechanism_change declaration, ablation runner for promoted candidates, doctrine/lessons/, doctrine_tests/, split visibility audit, negative-control CI, raw trace store, Pareto frontier. Defer to v1/v2: complex branch-value scheduling, automatic mechanism-family classifier, full doctrine distiller, multi-domain transfer tests, LLM-based trace-quality judge, large-scale hydra integration.
+
+## 14. Hybrid retriever instantiation
+
+Agent learning objective: learn when retrieval failures are caused by lexical matching, graph expansion, dedup, reranking, or context budgeting. Curriculum clusters: lexical miss, graph noise, dedup damage, rerank inversion, budget starvation, family leakage, empty retrieval. Example candidate hypothesis: mechanism=dedup_damage, hypothesis="File-level dedup removes correct symbol-level graph hits when lexical results share the same file", change="Dedup by (file, symbol_span) instead of file only for graph candidates", expected_gain="target-symbol recall@10 improves on symbol-family queries", expected_cost="slightly more context tokens", evidence=specific run/trace pointers.
+
+## 15. HALO-X instantiation
+
+Agent learning objective: learn how planning, work-unit decomposition, execution, acceptance, monitoring, and rollback interact under hidden evaluator constraints. Curriculum clusters: goal drift, false completion, architecture erosion, hidden invariant miss, tool rabbit hole, test weakening, trace suppression, rollback failure. Example: mechanism=false_completion, hypothesis="acceptance skill treats visible test pass as sufficient and does not check architecture-preservation invariants", change="Add acceptance rule requiring invariant oracle citation before done", expected_gain="lower false_completion_rate", expected_cost="slightly more tool calls".
+
+## 16. The strongest answer in one sentence
+
+Agents learn their harness when the system forces them to repeatedly answer this question with evidence: **"Which harness decision caused this failure, what minimal harness change tests that diagnosis, and what ablation proves the change — not some confound — caused the improvement?"** Everything else is infrastructure.
+
+--- SEED END ---
+
+## Output requirements for the council
+
+- Lead the deliberation with the strongest counterargument to the seed before any agreement.
+- Engage the seed's specific claims by section. Where the seed is wrong, say so. Where it is silent on a load-bearing primitive, name what is missing.
+- The final consensus must specify: (a) what survives adversarial review unchanged, (b) what must change and why, (c) what is missing entirely, (d) explicit confidence (high/moderate/low/unknown) on the final verdict.
+- Do not pad. Andreessen voice throughout.

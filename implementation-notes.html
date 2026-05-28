@@ -30,12 +30,239 @@
 
 <h1>agents-council — Implementation Notes</h1>
 <p class="sub">A running log of decisions not in the original ask, changes, tradeoffs, and things to know.
-Maintained by Claude across the build-out of the multi-model autonomous council. Newest section at the bottom.</p>
+Maintained across the build-out of the multi-model autonomous council. Newest section first.</p>
+
+<h2>Session 2026-05-28 — ArXivIQ scraper</h2>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span>Mapped arXiv-discovered ideas into concrete IP-HOPE tier changes</h3>
+  <div class="meta"><code>harness/ip_hope_tier_changes_from_arxiv_analogies.md</code> · tier change proposals</div>
+  <p>Created a tier-by-tier proposal file from Tier 2.9 through Tier 8.0. Every proposed change is explicitly labeled
+  as either a direct application of a paper idea or an analogous use, and references the source paper.</p>
+  <p class="why"><b>Validation:</b> the file covers all 16 assessed tiers, includes 22 arXiv source links, and contains
+  31 direct-application labels plus 54 analogous-use labels.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span>Ran v5 analogical arXiv discovery on HOPE/IP-HOPE limitations</h3>
+  <div class="meta"><code>harness/hope_v5_analogical_arxiv_discovery.md</code> · v5 skill application</div>
+  <p>Applied <code>analogical-arxiv-scout-v5</code> to redo the HOPE limitation-lifting paper search with target x-ray,
+  abstraction map, candidate triage, review cards, transfer matrix, invention candidates, verification record,
+  promoted research artifact, and comparison against the previous two attempts.</p>
+  <p class="why"><b>Result:</b> v5 promoted <em>Proof-Carrying Freshness-Energy Routes</em> as the strongest synthesis,
+  combining proof-carrying plans, conformal risk control, AoI/EH scheduling, and runtime shields. It also demoted
+  prior broad surveys and generic MARL/GNN papers unless used as proposal generators.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span>Added v5 analogical arXiv discovery engine after quality challenge</h3>
+  <div class="meta"><code>/home/dstefanescu/.codex/skills/analogical-arxiv-scout-v5</code> · skill hardening</div>
+  <p>Created a stronger v5 rather than modifying prior versions. v5 adds execution modes, target X-ray, abstraction map,
+  mechanism-based search, typed paper triage, invention candidates, kill tests, operator traces, governance checks,
+  and reusable output schemas.</p>
+  <p class="why"><b>Correction:</b> v2-v4 were valid but too procedural. v5 forces concrete intellectual work:
+  mechanism transfer, false-analogy rejection, falsifiers, source fidelity, and promoted research artifacts.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span>Created v2/v3/v4 analogical arXiv scout skills from discovery protocol</h3>
+  <div class="meta"><code>/home/dstefanescu/.codex/skills/analogical-arxiv-scout-v2</code>, <code>...-v3</code>, <code>...-v4</code> · skill versioning</div>
+  <p>Kept the original <code>analogical-arxiv-scout</code> unchanged and added three versioned skills with increasing
+  discovery rigor: v2 mechanism-transfer mapping, v3 operator-guided concept-frame generation, and v4 constitutional
+  recursive discovery with research, verification, operator-policy, and governance artifacts.</p>
+  <p class="why"><b>Source method:</b> adapted <code>novelty/versions/discovery_process_master.md</code> into skill-specific
+  workflows and reference rubrics rather than copying the whole protocol verbatim.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span>Created reusable analogical arXiv scouting skill</h3>
+  <div class="meta"><code>/home/dstefanescu/.codex/skills/analogical-arxiv-scout</code> · skill creation</div>
+  <p>Added a new Codex skill for finding arXiv papers whose mechanisms transfer by analogy to a target topic,
+  scoring the transfer quality, rejecting weak analogies, and synthesizing novel application proposals.</p>
+  <p class="why"><b>Design choice:</b> the skill separates paper claims, transfer claims, and novel proposals, so it can
+  generate aggressive cross-domain ideas without treating analogy as evidence. A separate rubric file captures
+  false-analogy tests and novelty synthesis patterns.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span>Generated independent review cards for arXiv limitation-lifting papers</h3>
+  <div class="meta"><code>harness/arxiv_lift_papers_reviews.md</code> · paper review compendium</div>
+  <p>Created concise review cards for the 30 suggested arXiv papers. Each card reviews the paper on its own terms first,
+  then adds a separate section on applicability to the HOPE review limitations and the IP-HOPE tier program.</p>
+  <p class="why"><b>Scope:</b> these are source-grounded review cards from arXiv abstract pages and metadata, not full PDF-level
+  ArXivIQ deep dives. The file states that limitation explicitly.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span>Mapped arXiv papers to IP-HOPE limitation-lifting opportunities</h3>
+  <div class="meta"><code>harness/arxiv_papers_for_lifting_ip_hope_limitations.md</code> · HOPE/IP-HOPE research scan</div>
+  <p>Created a curated arXiv bibliography grouped by the assessment's limitation classes: nonlinear RF harvesting,
+  finite-battery energy policy, physical-interference scheduling, conformal uncertainty, belief planning, GNN route
+  priors, cooperative RF actions, digital twins, and federated/degraded authority.</p>
+  <p class="why"><b>Tradeoff:</b> several learning papers are useful only as candidate/prior/uncertainty generators.
+  The file explicitly keeps route authority with certificate, replay, and ancestor-coverage mechanisms.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span>Compared IP-HOPE tiers against HOPE review limitations using tier docs</h3>
+  <div class="meta"><code>harness/ip_hope_tiers_vs_hope_review_limitations.md</code> · HOPE/IP-HOPE assessment</div>
+  <p>Produced a standalone assessment starting at Tier 2.9 and explicitly checked the <code>docs/</code> subtree for each
+  substantive tier directory. Archive, scratch, and worktree copies were treated as support artifacts rather than
+  separate conceptual tiers.</p>
+  <p class="why"><b>Tradeoff:</b> the assessment distinguishes architectural mitigation from empirical proof. Several
+  tiers add hardware profiles, HIL gates, certificates, and evaluation cubes, but those are not the same as broad
+  real-RF validation of nonlinear harvesters, MAC behavior, mobility, or adaptive adversaries.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span>Raised ArXivIQ generation target from format mimicry to corpus-calibrated review quality</h3>
+  <div class="meta"><code>harness/arxiviq_review_generation_approach.md</code>, <code>harness/arxiviq_corpus_inspection.md</code>, <code>/home/dstefanescu/.codex/skills/arxiviq-full-reviewer</code> · review-generation standard</div>
+  <p>Reformulated the paper-review approach around the full local ArXivIQ corpus rather than the smaller public
+  subset or superficial HTML layout. The method now requires exemplar retrieval/inspection, a paper-decomposition
+  brief, an intellectual thesis, visual-synthesis decisions, and a critic pass against the corpus bar.</p>
+  <p class="why"><b>Correction:</b> the previous approach did not inspect the subscription examples carefully enough.
+  A structured inspection now parses 374 extracted review bodies and records sampled patterns. The standard is
+  intellectual and intuitive parity with the examples, not just matching section labels, typography, or embedded figures.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span>Dependency-free Bun scraper in <code>harness/</code></h3>
+  <div class="meta"><code>harness/scrape_arxiviq.ts</code> · user-requested utility</div>
+  <p>Added a standalone scraper for <code>https://arxiviq.substack.com/archive?sort=new</code>.
+  It uses Substack's archive JSON endpoint for post discovery, fetches each server-rendered post page,
+  and extracts <code>Authors</code>, <code>Paper</code>, optional <code>Code</code>/<code>Model</code>, and the public
+  <code>TL;DR</code> block into Markdown or JSON.</p>
+  <p class="why"><b>Tradeoff:</b> avoided browser automation and extra packages because the target fields
+  are present in the initial HTML. Paid posts may expose only the public lead-in; this matches the user's
+  requested fields but will not recover post body content beyond Substack's cutoff.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>Added full-public-review collector</h3>
+  <div class="meta"><code>harness/scrape_arxiviq_full_reviews.ts</code> · follow-up utility</div>
+  <p>Added a separate script that keeps only ArXivIQ posts with complete paper metadata, public
+  <code>audience === "everyone"</code>, no rendered Substack continuation/paywall gate, and a final detected
+  review section labeled <code>Impact</code> or an Impact variant. Output includes the visible full review text,
+  not just the TL;DR.</p>
+  <p class="why"><b>Decision:</b> treated <code>audience</code>, gate-text detection, and an Impact-ending
+  section as the public-full-review filter. This avoids classifying paid previews or partial public snippets
+  as complete reviews.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span>Created ArXivIQ full-review generation skill</h3>
+  <div class="meta"><code>/home/dstefanescu/.codex/skills/arxiviq-full-reviewer</code> · reusable Codex skill</div>
+  <p>Analyzed the 14 accepted full public reviews that ended in an Impact-labeled section and created
+  an auto-discovered Codex skill for generating reviews at the same structural quality bar.</p>
+  <p class="why"><b>Pattern:</b> accepted reviews are roughly 1,100-1,700 words, start with metadata and
+  <code>TL;DR</code>, use <code>Details</code> with named technical subsections, include limitations, and end with
+  an <code>Impact</code> section. The skill encodes those constraints plus a source-grounding checklist.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>Added authenticated ArXivIQ review downloader</h3>
+  <div class="meta"><code>harness/download_arxiviq_reviews.ts</code> · subscription-backed archive download</div>
+  <p>Added a script that paginates the full ArXivIQ Substack archive and fetches post HTML with a user-provided
+  Substack cookie from <code>ARXIVIQ_COOKIE</code>, <code>--cookie</code>, or <code>--cookie-file</code>. It extracts paper
+  metadata and full review bodies into Markdown or JSON and can optionally save authenticated HTML snapshots.</p>
+  <p class="why"><b>Safety:</b> the script does not bypass access controls. It fails fast without a cookie unless
+  <code>--allow-unauthenticated</code> is set, and skips posts where a paywall gate is still detected.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>Added static HTML sanitizer for local Safari viewing</h3>
+  <div class="meta"><code>harness/make_arxiviq_static_html.ts</code> · local render fix</div>
+  <p>Generated <code>harness/arxiviq_subscription_download/html_static/</code> from the authenticated HTML
+  snapshots by stripping Substack scripts. This prevents the client-side Substack app from rewriting
+  <code>file://</code> pages into a "Page not found" view in Safari.</p>
+  <p>Follow-up: generated <code>harness/arxiviq_subscription_download/html_static_named/</code> with
+  <code>.static.html</code> filenames for all 377 downloaded reviews, matching the Mac/Safari transfer pattern.</p>
+  <p>Follow-up: also generated in-place sibling files beside the originals under
+  <code>harness/arxiviq_subscription_download/html/</code>, e.g. <code>376-alphaevolve.html</code> and
+  <code>376-alphaevolve.static.html</code>. The sanitizer now skips existing static outputs to avoid
+  <code>.static.static.html</code> duplication.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>Rendered the Sheikholeslami review as article HTML</h3>
+  <div class="meta"><code>harness/render_review_html.ts</code>, <code>harness/allerton_2025_sheikholeslami_review.html</code> · review presentation</div>
+  <p>Added a reusable renderer that converts the ArXivIQ-style Markdown review into a standalone,
+  script-free article HTML page with Substack-like typography, metadata block, lede callouts, equations,
+  named technical subsections, and representative paper figures.</p>
+  <p>Follow-up: redesigned the renderer to accept a figure-spec JSON and crop figures from the source PDF
+  via PyMuPDF. For the Sheikholeslami review, it now embeds Fig. 2, Fig. 3, and Fig. 4 near the numerical
+  evidence discussion.</p>
+  <p>Follow-up: added <code>--inline-assets</code> so the renderer can produce a single self-contained HTML
+  artifact with base64 data-URI figures, matching the downloaded Substack examples' transfer-friendly shape.
+  The linked-asset mode remains available for smaller HTML when local asset folders are acceptable.</p>
+  <p>Follow-up: added a semantic concept-diagram path to the visual layer. The figure spec now supports
+  authored SVG concept figures as well as extracted paper figures; the Sheikholeslami review includes a
+  generated HOPE routing-intuition diagram before the mechanism explanation, followed by the paper's
+  empirical figures near the numerical evidence discussion.</p>
+  <p>Follow-up: regenerated the Sheikholeslami review under the stricter corpus-calibrated standard. The
+  rewritten review now uses an ArXivIQ-style intellectual arc: interference sign error, bottleneck latency,
+  outage-to-geometry reduction, HOPE/Dijkstra mechanism, benchmark analysis, limitations, and impact.</p>
+  <p class="why"><b>Validation:</b> the generated HTML has zero scripts, preserves four top-level sections,
+  five detail subsections, one generated concept visual, three extracted paper figures, and the final
+  <code>Impact &amp; Conclusion</code> section.
+  Headless Chromium rendered the regenerated single-file concept-visual output at 1280×3600 successfully.</p>
+</div>
+
+<h2>Session 2026-05-26 — HALO-X recovery council wrapper</h2>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>Bounded OpenRouter waits and failure transcripts</h3>
+  <div class="meta"><code>src/core/services/modelCouncil.ts</code>, <code>scripts/council-solve.ts</code> · bug fix</div>
+  <p>OpenRouter requests now abort after <code>AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS</code>
+  milliseconds, defaulting to 90 seconds. <code>AGENTS_COUNCIL_OPENROUTER_URL</code> is available
+  for test redirection.</p>
+  <p><code>council-solve</code> now writes <code>council-failed-*.json</code> and
+  <code>council-failed-*.md</code> when a provider failure prevents a normal consensus transcript.
+  This preserves the prompt, selected members, and failure reason instead of leaving no artifact.</p>
+  <p class="why"><b>Bug:</b> Kimi/DeepSeek OpenRouter runs could wait indefinitely because
+  <code>fetch</code> had no abort signal and the response body read was not bounded. Transcripts
+  were also only saved after full success.
+  <b>Validation:</b> focused tests cover hung OpenRouter response timeout and failed-transcript
+  persistence; CLI smoke confirms failed transcripts are written on provider failure.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>Added member selection for bounded reviewer runs</h3>
+  <div class="meta"><code>src/core/services/modelCouncil.ts</code>, <code>modelCouncil.test.ts</code> · HALO-X review support</div>
+  <p>Added <code>AGENTS_COUNCIL_MEMBERS</code>, a comma-separated selector for autonomous model
+  council runs. Example: <code>AGENTS_COUNCIL_MEMBERS=kimi,deepseek</code> limits validation and
+  execution to Kimi K2.6 and DeepSeek V4 Pro through OpenRouter while preserving the default
+  all-member council when the variable is unset.</p>
+  <p class="why"><b>Why:</b> the default five-member run failed on the Gemini model id before
+  reaching OpenRouter reviewers. The selector lets a task request the two OpenRouter reviewers
+  directly without touching Gemini, Codex, or Claude. Validated with
+  <code>bun test src/core/services/modelCouncil.test.ts</code>.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>Added a bounded Claude/Codex recovery-council script</h3>
+  <div class="meta"><code>scripts/halo-recovery-council.ts</code>, <code>package.json</code> · user-requested</div>
+  <p>Added <code>bun run halo:recover -- &lt;ledger.md&gt;</code> to turn a HALO-X consensus ledger into a
+  normal Agents Council session, seed Codex's objections, summon Claude and Codex for a capped number
+  of rounds, and append the latest resolution back to the ledger.</p>
+  <p>The script also supports per-run model overrides with <code>--claude-model</code>,
+  <code>--codex-model</code>, and <code>--codex-reasoning-effort</code> so recovery councils can use
+  explicitly requested subscription models without changing saved defaults.</p>
+  <p>Follow-up: recovery summons now pass a read-only evidence workspace to Claude and Codex. Claude
+  receives the workspace as <code>cwd</code>/<code>additionalDirectories</code> with only
+  <code>Read</code>, <code>Glob</code>, <code>Grep</code>, and council MCP tools allowed; Codex receives the
+  same workspace as its read-only thread directory.</p>
+  <p class="why"><b>Decision not in spec:</b> kept this as a script instead of adding a public
+  <code>council recover</code> command so the workflow can harden before becoming part of the CLI contract.
+  <b>Tradeoff:</b> the script uses the default persisted council state because the current summon functions
+  create their own <code>FileCouncilStateStore</code>. <b>Safety:</b> <code>--dry-run</code> validates prompt construction
+  without spending Claude/Codex calls or writing to the ledger.</p>
+</div>
 
 <h2>Session 2026-05-23 — Multi-model council, persistence, robustness, convergence</h2>
 
 <p>Context: wiring the autonomous <code>run_model_council</code> loop to 5 AI members
-(Kimi 2.6, DeepSeek V4 Pro, Gemini 3.5 Flash via OpenRouter; ChatGPT via Codex/OpenAI subscription;
+(Kimi K2.6, DeepSeek V4 Pro, Gemini 3.5 Flash via OpenRouter; ChatGPT via Codex/OpenAI subscription;
 Opus 4.7 via Claude Code/Anthropic subscription), then getting a live run to actually complete and
 making its output legible.</p>
 
@@ -268,6 +495,65 @@ making its output legible.</p>
   <div class="meta">.gitignore</div>
   <p>Local Claude Code session state (handoffs under <code>.claude/handoffs/</code>) was showing as untracked. Ignored
   it alongside the existing <code>.halo-x/</code> and <code>deliberations/</code> entries so it never enters the tree.</p>
+</div>
+
+<h2>Session 2026-05-26 — Move Gemini off OpenRouter to the official <code>gemini</code> CLI</h2>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span>Use the official <code>@google/gemini-cli</code>, not Google AI Studio API keys</h3>
+  <div class="meta">provider swap · subscription auth</div>
+  <p>User asked for Gemini to leave OpenRouter and run "the same way as Claude and Codex" — i.e. via their
+  subscription auth, mirroring the local CLI pattern (<code>@anthropic-ai/claude-agent-sdk</code> → <code>claude</code>
+  CLI; <code>@openai/codex-sdk</code> → <code>codex</code> CLI). Initial direction (Google AI Studio
+  <code>GEMINI_API_KEY</code> via <code>generativelanguage.googleapis.com</code>) was abandoned because that's
+  API-key billing, not subscription. The only first-party "subscription-style" Gemini surface is the
+  official open-source Google Gemini CLI (<code>github.com/google-gemini/gemini-cli</code>), which authenticates
+  via <code>gemini auth login</code> against a Google account.</p>
+  <p class="why"><b>Why:</b> matches user-stated intent and the existing askCodex pattern. No Node SDK analog
+  to Anthropic's / OpenAI's exists for Gemini — the CLI is the canonical primitive.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span>Gemini CLI is NOT installed locally; pre-run step required</h3>
+  <div class="meta">env prereq</div>
+  <p><code>which gemini</code> returned nothing on this host. To exercise the Gemini member, the user must run:
+  <code>npm install -g @google/gemini-cli</code>, then <code>gemini auth login</code> once.
+  <code>validateCouncilConfig</code> deliberately does <em>not</em> hard-fail on missing CLI at startup; the
+  error fires inside <code>askGemini</code> with actionable install instructions, mirroring how
+  <code>getCodexExecutablePath</code> returns null.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span>"Google One subscription" does not mean what users tend to think</h3>
+  <div class="meta">auth model</div>
+  <p>Google One / Google AI Pro / Google One AI Premium grants Gemini Advanced access in the consumer app
+  at gemini.google.com. It does <em>not</em> grant programmatic API/CLI quota. Even after
+  <code>gemini auth login</code> on a Google AI Pro account, the CLI may still hit the standard OAuth free-tier
+  quota (≈60 req/min, 1000 req/day historically); Google has been inconsistent about routing subscription
+  benefits to the API/CLI surface. Confidence: moderate — Google's stance evolves.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag tradeoff">Tradeoff</span>Dropped Anthropic-style <code>cache_control</code> on the Gemini path</h3>
+  <div class="meta">caching</div>
+  <p>The OpenRouter path marks a stable prompt prefix with <code>cache_control: { type: "ephemeral" }</code> so
+  providers that honor it serve repeated rounds from cache. Google's caching equivalent (<code>cachedContents</code>)
+  is a separate explicit API that requires creating and referencing named cache entries — not a per-message
+  marker. <code>askGemini</code> flattens multi-part content via <code>flattenMessageContent</code>, discarding
+  the cache hint. <b>Tradeoff:</b> per-deliberation cost on the Gemini member will not benefit from prefix
+  caching; for short multi-round runs the savings would have been small, and the Gemini CLI's pricing/quota
+  is governed by Google's tier anyway.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>Wire diff (modelCouncil.ts + summon.ts)</h3>
+  <div class="meta">code</div>
+  <ul>
+    <li><code>summon.ts</code>: new <code>getGeminiExecutablePath(): Promise&lt;string | null&gt;</code> + <code>GEMINI_PATH</code> env override, mirroring <code>getCodexExecutablePath</code>.</li>
+    <li><code>modelCouncil.ts</code>: extended <code>provider</code> union with <code>"gemini"</code>; flipped the default Gemini member to <code>provider: "gemini"</code>; default model slug changed from OpenRouter's <code>google/gemini-3.5-flash</code> to plain <code>gemini-3.5-flash</code>; added a Gemini branch in <code>askMember</code>; OpenRouter error message no longer claims Gemini; new <code>askGemini</code> spawns <code>gemini -m &lt;model&gt;</code> with the prompt piped via stdin (avoids ARG_MAX on large file-inlined prompts from <code>council-solve.ts</code>), retries 3× on non-zero exit.</li>
+    <li>Model slug <code>gemini-3.5-flash</code> is the user-stated target name; confidence on Google's actual public slug is moderate (Google's docs commonly show 2.5 family). Override with <code>AGENTS_COUNCIL_GEMINI_MODEL</code> if the CLI rejects it.</li>
+    <li>Gates after the change: <code>bun run typecheck</code> clean, <code>bun test</code> 15/15, <code>bun run format:check</code> clean.</li>
+  </ul>
 </div>
 
 </body>

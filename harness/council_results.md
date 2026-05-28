@@ -1,0 +1,116 @@
+# 5-Agent Council — Harness Learning
+
+**Topic.** How do we get an agent to learn its harness?
+
+**Voice.** Each agent operates under `andreesen_prompt.txt` (lead with strongest counterargument; explicit confidence; no flattery).
+
+**Seed.** `55p_ideas.md` (v0 proposal: harness-learning curriculum + trace-to-delta loop).
+
+---
+
+## Contrarian
+
+*session 05c010c5-aff5-4fe6-925d-dce9d28d9a83 · model default*
+
+**Strongest counterargument first.** This is not "an agent learning its harness." It is *you* learning the harness and renting the agent as a search operator over a state space you've already pre-labeled. If `harness_map.json`, failure clusters, mechanism families, doctrine tests, and apprenticeship cases all have to be hand-authored, the learning lives in your head. The agent is downstream of a curriculum you built. Be honest about this: it is a teaching apparatus, not a learning agent. Renaming "documentation + curated curriculum" as "harness-doctrine learning" obscures where the cognitive work actually happens — in the human writing the harness card.
+
+**The one-mechanism edit rule is over-prescribed.** Interactions are where harnesses actually break. New dedup may only pay with new budgeter; new acceptance only with new monitor. Mandatory isolated edits at *proposal* time bias the frontier toward small additive deltas — exactly the "environment bootstrap" archetype the paper celebrates — and systematically suppress combinatorial wins. Enforce mechanism isolation at *post-hoc ablation* time, after a candidate has earned attention. Otherwise you are running a methodology, not a search.
+
+**N=1 narrative inflation.** The TerminalBench bootstrap story is one anecdote dressed up as a causal mechanism. There is no evidence the "contrastive diagnosis → isolated test → safer delta" sequence produced the win versus more candidates × more time × post-hoc retelling. Don't generalize a curriculum from one selected trajectory.
+
+**Doctrine ossifies and leaks.** Promoted lessons become priors every future proposer reads. L0004 quietly shuts down dedup-by-file candidates even after the underlying index changes. `do_not_generalize_to` is wishful. Doctrine needs expiration dates and forced re-falsification each epoch, or it becomes legacy code in prose.
+
+**Cost is unstated.** Required ablations × four-role architecture × frozen evaluator epochs × negative-control CI × hydra is an order-of-magnitude tax over the paper's vanilla loop. At some candidate-cost ratio, brute-force search dominates pedagogy. Where is the compute budget?
+
+**What survives.** Harness map — cheap, keep. Decision traces — load-bearing, keep. Proposer/evaluator/distiller separation — prevents self-justification, keep. Negative controls — keep. Drop the one-mechanism mandate at proposal time. Add doctrine expiration. Stop calling curriculum authorship "agent learning."
+
+Confidence: **moderate**. Directionally right on instrumentation, wrong on pedagogy framing, over-prescribed on edit discipline.
+
+STRONGEST CLAIM: The seed mislabels human-authored curriculum as agent learning; the load-bearing pieces are decision traces and role separation, while the one-mechanism rule will systematically suppress the combinatorial wins the harness actually needs.
+
+## Executor
+
+*session da817774-83eb-4116-a416-6a466cc77524 · model default*
+
+**Counterargument first.** The seed names twelve "Required for v0" artifacts — harness_map, decision_trace, failure_cluster, candidate_hypothesis, one-mechanism declaration, ablation runner, doctrine/, doctrine_tests/, split-visibility audit, negative-control CI, raw trace store, Pareto frontier. That is not v0; that is a quarter of substrate built before the first piece of learning evidence exists. You cannot know which of those mechanisms actually teach until you have one end-to-end loop, on one domain, producing one ablation-backed doctrine entry. The paper's TerminalBench result emerged from an *informal* proposer-confound-isolation loop. Formalize that minimum first; build the bureaucracy around it after it has paid for itself once. Second overreach: "automatic ablation on every promising candidate" is 5–10× evaluation cost — gate it behind frontier promotion or it will dominate your compute budget before doctrine exists to justify it. Third: full per-component decision_trace schemas will be wrong on first pass. Log at *miss points* first, expand on demand.
+
+**Three work units, ROI-ranked, ship in five working days.**
+
+**WU-1 (3 days, highest ROI) — Minimal Harness Learning Loop on hybrid retriever.**
+Deliverables: `harness_map.json` (single file, ~1 hr); miss-point decision trace (only logged on ground-truth miss, not every component every query); 20 curriculum queries clustered into 4 failure modes (lexical miss, graph noise, dedup damage, budget starvation — skip rerank/family/empty for now); `candidate_hypothesis.json` schema enforcing `mechanism_family` + `non_changes`; one ablation runner that compares full vs. one component reverted. **ROI:** first evidence-backed doctrine entry. Proves the mechanism is real before scaling it.
+
+**WU-2 (1 day) — Role separation enforced at the filesystem.**
+`proposer/`, `evaluator/`, `distiller/` with `allowed_mutables` declared per role and a pre-commit hook that rejects cross-role writes. **ROI:** kills the self-justification collapse the seed correctly identifies but never operationalizes. Cheapest high-leverage win in the design.
+
+**WU-3 (1 day) — Doctrine schema + 5 seeded lessons.**
+`doctrine/lessons/L0001–L0005` written from the paper's TerminalBench narrative (environment bootstrap; prompt cleanup as confound; additive > control-flow edits; raw traces over summaries; isolate-then-bundle). Each carries evidence pointers and `do_not_generalize_to`. **ROI:** proposer starts with prior art to cite — no cold-start rediscovery — and you have the apprenticeship corpus the seed wants at 30–50 cases without paying for 30–50 cases upfront.
+
+**Defer to v1+:** failure-cluster automation, Pareto frontier scheduling, trace-quality LLM judge, mechanism-family classifier, multi-domain transfer, HALO-X port. Retrieval is the cleanest signal; prove the loop there first.
+
+**Confidence: moderate.** The seed's pedagogy framing is correct; the sequencing buries the proof under infrastructure.
+
+STRONGEST CLAIM: Ship one ablation-backed doctrine entry on the retriever in five days before building any of the other ten substrate artifacts the seed marks "Required for v0."
+
+## Expansionist
+
+*session 58a90a04-a213-49d4-8808-7e852da9cd5f · model default*
+
+The seed mistakes curriculum hygiene for learning. "One-mechanism edits + ablations + doctrine prose" is the safe-and-orderly version of harness improvement — and safe-and-orderly is exactly where the asymmetric upside is not. The fat tail lives in (a) candidates that change five things at once and stumble into a new regime, (b) cross-domain transplants no curriculum cluster predicted, and (c) proposers that rewrite the evaluator API itself. The seed's discipline taxes those moves and subsidizes 3% local wins. Wrong tradeoff if the target is a 10x harness; right tradeoff if the target is a defensible quarterly metric.
+
+Where the seed is correct: raw decision traces beat scalar scores; harness maps as introspection primitives; role separation so the proposer doesn't grade itself. Keep those. They are infrastructure, not pedagogy.
+
+The upside plays it misses, ranked:
+
+1. **Executable doctrine.** Lessons must compile to callable harness primitives, not markdown a human reads. `environment_bootstrap` becomes a tool the next proposer composes against, not an essay. Compounding library beats compounding prose by 10–100x. This is the single biggest lever in the seed's blind spot.
+
+2. **Population, not pipeline.** Run 20–50 proposers in parallel with diverse priors — conservative, aggressive, transplant-from-domain-X, deliberately-confounded. Pareto-merge. The seed's single-proposer-with-curriculum is a serial process pretending to be parallel and caps throughput at one hypothesis per epoch.
+
+3. **Cross-domain transplants as a first-class candidate type.** The retriever's dedup lesson should auto-propose into HALO-X acceptance; the HALO-X "false completion" doctrine should auto-propose into the NetLogo→CUDA semantic-equivalence oracle. Most harness wins are stolen, not invented. Build the steal mechanism.
+
+4. **Co-evolve the curriculum and evaluator.** Let proposers author new diagnostic tasks and new invariant oracles. The seed freezes both per epoch — ceiling = "harness optimized for failures we already imagined." Adversarial curriculum is where the unknown unknowns get surfaced.
+
+5. **Bandit credit assignment over exhaustive ablation.** Ablations cost O(k) per promoted candidate. A population-level multi-armed bandit over mechanism families gets directionally equivalent causal signal at ~1/k cost, freeing budget for weird candidates with fat-tailed EV.
+
+6. **Self-modifying tool API.** The TerminalBench bootstrap the seed cites *is itself* a tool-API expansion. The seed then proposes constraints that would have made that move ineligible. Let proposers add tools to themselves, gated only by negative-control survival.
+
+Confidence: **moderate-high**. The seed builds a floor for harness learning; the asymmetric upside requires building a ceiling the seed actively forbids.
+
+STRONGEST CLAIM: Disciplined one-mechanism curricula optimize the harness you already have; population-scale parallelism, executable doctrine, and cross-domain co-evolution are the only path to the harness you do not yet know how to specify.
+
+## First-principles
+
+*session 37843c24-b1e3-466d-b7c6-e5ba68fde9fc · model default*
+
+**Strongest counterargument first.** The seed never asks what "an agent learns its harness" actually means in substrate terms, and as a result it conflates two different things. Frozen-weight LLMs cannot internalize anything between runs. Only three substrates can carry harness knowledge across calls: (1) tokens in context (prompts, skills, decision_traces, doctrine, harness_map.json), (2) deterministic code/policy the harness executes whether or not the agent "knows" it, and (3) model weights — reachable only by SFT/RL on the trajectories this loop produces. The seed lives entirely in (1) and (2), calls it "the organization learns," then slides into "the agent learns." That equivocation matters: if the goal is genuine agent learning, the missing primitive is a training signal — the harness-learning loop must double as a trajectory factory for fine-tuning. The seed never names this.
+
+**Second counterargument.** Mandatory one-mechanism edits per candidate is over-prescribed and contradicted by the seed's own TerminalBench example, where the winning insight emerged from a multi-edit attempt being decomposed *after the fact*. Forcing one-mechanism-only at proposal time throttles search radius and bans the very exploration that surfaces non-obvious mechanism boundaries. Correct form: allow multi-mechanism candidates, but make ablation-into-isolated-mechanisms a *gating requirement for promotion and for doctrine*. Search wide, promote narrow.
+
+**Third.** The four-role separation and `doctrine_tests/` directory are governance theater layered before measurement. The only separation that load-bears is evaluator ⟂ proposer (the seed is right there). Distiller and task agent collapse into batch jobs over the frontier. Doctrine lessons should not spawn parallel test directories — they should mutate the evaluator and the negative-control set, otherwise they drift into prose.
+
+**What survives.** `decision_trace.jsonl` with an explicit `miss_reason` is the load-bearing primitive — agree, high confidence. `harness_map.json` as a structural contract — agree, moderate-high. Ablation-as-teacher — agree, but only for promoted candidates, gated by cost budget the seed omits.
+
+**What's missing.** (a) The weights pathway — without RL/SFT on harness-learning traces, the loop trains the *codebase*, not the agent. (b) An independent miss-attribution oracle — once `miss_reason` is proposer-authored, it gets gamed. (c) Cost accounting for ablations; at N mechanisms, runtime is N× per promotion.
+
+**Verdict: moderate confidence.** Directionally right on contrast, traces, doctrine. Wrong on substrate framing and over-built on governance.
+
+STRONGEST CLAIM: Decision-traces plus promotion-gated ablation are the only two primitives that actually teach; everything else in the seed is either weight-free prose the agent cannot internalize or premature governance that should be deleted until measurement justifies it.
+
+## Outsider
+
+*session 8c7e81cf-6cea-407f-af8a-4b2681cab94b · model default*
+
+**Strongest counterargument.** The seed is written for an audience already fluent in its dialect. An outsider cannot tell what a "harness" *is*. Prompt? Scaffolding around the LLM call? Eval rig? CI? All of them? The word does forty pages of load-bearing work without one sentence of definition. Not pedantry — central confusion. If "harness" is prompt+tools, "learning the harness" is prompt-engineering at scale. If it's the eval rig, it's Goodhart with extra steps. If it's both, the agent is mutating the thing that measures it. The seed never picks, and every downstream prescription inherits the ambiguity.
+
+**Second.** The seed assumes a stable harness to be learned. The whole premise of Meta-Harness is that the harness mutates each iteration. A "curriculum" against a moving target requires first declaring which parts are stable enough to be learnable. `immutable_components` is named as governance, not as a learning contract. Which subset of the harness is the *learnable* harness — stable across the agent's career — versus the part being actively redesigned this epoch?
+
+**Third.** "The agent learns" is undefined in any substrate an outsider can point at. LLMs are stateless between calls; another responder flagged this. Outsider version: nobody outside the team can tell whether "agent learning" means (a) the next prompt gets fatter, (b) a future fine-tune absorbs the trajectories, or (c) the codebase changes and the agent itself never changes. Three completely different programs of work, fused under one verb.
+
+**Jargon an outsider bounces on, none defined:** harness, doctrine, frontier-safe, branch ledger, split visibility, trace-quality checks, hydra, MDOC, HALO-X, NetLogo→CUDA, hybrid retriever, TerminalBench, v3 proposal. The document reads like a manifesto for a team already in agreement, not an argument to a skeptic.
+
+**What survives the outsider pass.** Decision traces with explicit miss-reasons — obvious why they matter. Proposer ⟂ evaluator separation — first-principles defensible. Ablation as causal teacher — defensible. Harness map as a structural contract — defensible once "harness" is defined. Everything else needs a definitions appendix to survive a reader who hasn't lived inside this stack for six months.
+
+**Verdict: moderate confidence.** The mechanism may be right; the exposition assumes the audience already believes it, which is exactly the failure mode the seed warns about in agents.
+
+Single most important unanswered question: *What test, run in isolation from any harness-improvement task, would falsify the claim that the agent has learned the harness — rather than that you have pre-loaded the answer into a prompt, skill, or doctrine file the agent retrieves on demand?*
+
+STRONGEST CLAIM: Until "harness," "learning," and the substrate that carries knowledge between calls are nailed down, the entire proposal is a sophisticated way of moving the human's knowledge into prompts and calling the round-trip "agent learning."

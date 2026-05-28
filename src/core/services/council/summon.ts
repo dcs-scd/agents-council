@@ -51,6 +51,8 @@ export type SummonAgentInput = {
   agent: string;
   model?: string | null;
   reasoningEffort?: string | null;
+  workingDirectory?: string | null;
+  readOnlyEvidence?: boolean;
 };
 
 export type SummonAgentResult = {
@@ -79,6 +81,7 @@ const READ_ONLY_TOOLS = new Set(["Read", "Glob", "Grep"]);
 const SUMMON_DEBUG_ENV = "AGENTS_COUNCIL_SUMMON_DEBUG";
 const CLAUDE_CODE_PATH_ENV = "CLAUDE_CODE_PATH";
 const CODEX_PATH_ENV = "CODEX_PATH";
+const GEMINI_PATH_ENV = "GEMINI_PATH";
 const MODEL_REFRESH_TIMEOUT_MS = 8000;
 const CODEX_CONFIG_PATH = path.join(os.homedir(), ".codex", "config.toml");
 const MODEL_REASONING_EFFORTS: ModelReasoningEffort[] = ["minimal", "low", "medium", "high", "xhigh"];
@@ -145,6 +148,26 @@ export async function getCodexExecutablePath(): Promise<string | null> {
     return resolveExecutablePath(envPath);
   }
   const systemPath = await resolveExecutablePath("codex");
+  if (isAbsolutePath(systemPath)) {
+    return systemPath;
+  }
+  return null;
+}
+
+export async function getGeminiExecutablePath(): Promise<string | null> {
+  // Priority: env var > system `gemini` on PATH > null (not installed).
+  // Mirrors getCodexExecutablePath. Targets the official @google/gemini-cli
+  // (github.com/google-gemini/gemini-cli), which authenticates via
+  // `gemini auth login` against the user's Google account — the same
+  // subscription-style auth Claude/Codex use through their own CLIs.
+  // Install: `npm install -g @google/gemini-cli`. No SDK is bundled with the
+  // project, so null means "Gemini CLI is not installed" and the caller must
+  // surface an actionable error.
+  const envPath = process.env[GEMINI_PATH_ENV]?.trim();
+  if (envPath && envPath.length > 0) {
+    return resolveExecutablePath(envPath);
+  }
+  const systemPath = await resolveExecutablePath("gemini");
   if (isAbsolutePath(systemPath)) {
     return systemPath;
   }
@@ -518,6 +541,8 @@ export async function summonClaudeAgent(input: SummonAgentInput): Promise<Summon
       agent,
       model: input.model ?? null,
       cwd: process.cwd(),
+      workingDirectory: input.workingDirectory ?? null,
+      readOnlyEvidence: input.readOnlyEvidence ?? false,
     },
   });
   const store = new FileCouncilStateStore();
@@ -542,6 +567,8 @@ export async function summonClaudeAgent(input: SummonAgentInput): Promise<Summon
   const model = input.model === undefined ? savedAgent.model : normalizeOptionalString(input.model);
   const reasoningEffort =
     input.reasoningEffort === undefined ? savedAgent.reasoningEffort : normalizeOptionalString(input.reasoningEffort);
+  const workingDirectory = normalizeWorkingDirectory(input.workingDirectory);
+  const readOnlyEvidence = input.readOnlyEvidence === true;
 
   await upsertSummonSettings({
     lastUsedAgent: agent,
@@ -565,13 +592,15 @@ export async function summonClaudeAgent(input: SummonAgentInput): Promise<Summon
     tools: buildCouncilTools(service, agent, session.id),
   });
 
-  const prompt = buildClaudeSummonPrompt();
+  const prompt = buildClaudeSummonPrompt({ workingDirectory, readOnlyEvidence });
   const claudeCodePath = await getClaudeCodeExecutablePath();
 
   const response = query({
     prompt: createPromptMessages(prompt),
     options: {
       pathToClaudeCodeExecutable: claudeCodePath,
+      cwd: workingDirectory ?? process.cwd(),
+      additionalDirectories: workingDirectory ? [workingDirectory] : [],
       mcpServers: {
         [SUMMON_SERVER_NAME]: councilServer,
       },
@@ -644,6 +673,8 @@ export async function summonCodexAgent(input: SummonAgentInput): Promise<SummonA
       model: input.model ?? null,
       runner: "codex",
       cwd: process.cwd(),
+      workingDirectory: input.workingDirectory ?? null,
+      readOnlyEvidence: input.readOnlyEvidence ?? false,
     },
   });
 
@@ -670,6 +701,8 @@ export async function summonCodexAgent(input: SummonAgentInput): Promise<SummonA
   const model = input.model === undefined ? savedAgent.model : normalizeOptionalString(input.model);
   const reasoningEffort =
     input.reasoningEffort === undefined ? savedAgent.reasoningEffort : normalizeOptionalString(input.reasoningEffort);
+  const workingDirectory = normalizeWorkingDirectory(input.workingDirectory);
+  const readOnlyEvidence = input.readOnlyEvidence === true;
 
   await upsertSummonSettings({
     lastUsedAgent: agent,
@@ -686,14 +719,14 @@ export async function summonCodexAgent(input: SummonAgentInput): Promise<SummonA
   });
 
   const requestFeedback = getFeedbackForSession(state, session.id).filter((entry) => entry.requestId === request.id);
-  const prompt = buildCodexSummonPrompt(request, requestFeedback);
+  const prompt = buildCodexSummonPrompt(request, requestFeedback, { workingDirectory, readOnlyEvidence });
   const codexPath = await getCodexExecutablePath();
   const codex = codexPath ? new Codex({ codexPathOverride: codexPath }) : new Codex();
   const thread = codex.startThread({
     model: model ?? undefined,
     modelReasoningEffort: normalizeModelReasoningEffort(reasoningEffort),
     sandboxMode: "read-only",
-    workingDirectory: process.cwd(),
+    workingDirectory: workingDirectory ?? process.cwd(),
     skipGitRepoCheck: true,
     approvalPolicy: "never",
     networkAccessEnabled: false,
@@ -808,7 +841,7 @@ function toolError(error: unknown): CallToolResult {
   };
 }
 
-function buildClaudeSummonPrompt(): string {
+function buildClaudeSummonPrompt(options: { workingDirectory: string | null; readOnlyEvidence: boolean }): string {
   const lines = [
     "You are a Claude agent summoned to the Agents Council.",
     OBJECTIVE_CONSENSUS_DIRECTIVE,
@@ -820,10 +853,25 @@ function buildClaudeSummonPrompt(): string {
     "3) Call mcp__council__send_response with your advice.",
   ];
 
+  if (options.readOnlyEvidence) {
+    lines.push(
+      "",
+      "Read-only evidence mode is enabled.",
+      `Workspace: ${options.workingDirectory ?? process.cwd()}`,
+      "You may use Read, Glob, and Grep only to inspect repository evidence before sending your response.",
+      "Do not use shell commands or write tools.",
+      "When you rely on repository evidence, cite file paths and line numbers.",
+    );
+  }
+
   return lines.join("\n");
 }
 
-function buildCodexSummonPrompt(request: CouncilRequest, feedback: CouncilFeedback[]): string {
+function buildCodexSummonPrompt(
+  request: CouncilRequest,
+  feedback: CouncilFeedback[],
+  options: { workingDirectory: string | null; readOnlyEvidence: boolean },
+): string {
   const lines = [
     "You are a Codex agent summoned to the Agents Council.",
     OBJECTIVE_CONSENSUS_DIRECTIVE,
@@ -843,7 +891,18 @@ function buildCodexSummonPrompt(request: CouncilRequest, feedback: CouncilFeedba
     });
   }
 
-  lines.push("", "Reply with your advice only. Do not run commands or call tools.");
+  if (options.readOnlyEvidence) {
+    lines.push(
+      "",
+      "Read-only evidence mode is enabled.",
+      `Workspace: ${options.workingDirectory ?? process.cwd()}`,
+      "Use read-only repository inspection as needed before replying.",
+      "Do not modify files. Do not request approvals.",
+      "When you rely on repository evidence, cite file paths and line numbers.",
+    );
+  } else {
+    lines.push("", "Reply with your advice only. Do not run commands or call tools.");
+  }
   return lines.join("\n");
 }
 
@@ -907,6 +966,11 @@ function normalizeModelReasoningEffort(value: string | null): ModelReasoningEffo
     return undefined;
   }
   return MODEL_REASONING_EFFORTS.includes(value as ModelReasoningEffort) ? (value as ModelReasoningEffort) : undefined;
+}
+
+function normalizeWorkingDirectory(value: string | null | undefined): string | null {
+  const normalized = normalizeOptionalString(value);
+  return normalized ? path.resolve(normalized) : null;
 }
 
 function normalizeModelInfoFromAny(input: unknown): SummonModelInfo | null {

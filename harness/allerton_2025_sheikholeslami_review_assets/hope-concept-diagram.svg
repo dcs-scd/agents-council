@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 640" role="img" aria-labelledby="title desc">
+  <title id="title">HOPE interference-as-fuel routing intuition</title>
+  <desc id="desc">Conceptual diagram showing that HOPE rewards interference near transmitters because it supplies harvestable RF energy and penalizes interference near receivers because it increases outage risk.</desc>
+  <defs>
+    <marker id="routeArrow" markerWidth="13" markerHeight="13" refX="11" refY="6.5" orient="auto">
+      <path d="M2,2 L11,6.5 L2,11 Z" fill="#166534"/>
+    </marker>
+    <marker id="orangeArrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#c2410c"/>
+    </marker>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="7" stdDeviation="6" flood-color="#1d1a17" flood-opacity="0.14"/>
+    </filter>
+    <style>
+      .bg { fill: #fffaf2; }
+      .panel { fill: #ffffff; stroke: #eadfce; stroke-width: 2; }
+      .title { fill: #1d1a17; font: 800 29px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .subtitle { fill: #6f6255; font: 17px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .label { fill: #1d1a17; font: 800 17px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .small { fill: #4b4037; font: 16px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .tiny { fill: #6f6255; font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .node { fill: #dbeafe; stroke: #1d4ed8; stroke-width: 4; }
+      .dest { fill: #dcfce7; stroke: #15803d; stroke-width: 4; }
+      .interferer { fill: #ffedd5; stroke: #c2410c; stroke-width: 4; }
+      .wave { fill: none; stroke: #f97316; stroke-width: 3; stroke-dasharray: 8 8; opacity: 0.72; }
+      .route { fill: none; stroke: #166534; stroke-width: 8; stroke-linecap: round; stroke-linejoin: round; marker-end: url(#routeArrow); }
+      .baseline { fill: none; stroke: #94a3b8; stroke-width: 4; stroke-dasharray: 10 10; stroke-linecap: round; }
+      .energy { fill: none; stroke: #c2410c; stroke-width: 4; stroke-linecap: round; marker-end: url(#orangeArrow); }
+      .good { fill: #dcfce7; stroke: #86efac; stroke-width: 2; }
+      .bad { fill: #fee2e2; stroke: #fca5a5; stroke-width: 2; }
+      .formula { fill: #fff7ed; stroke: #fdba74; stroke-width: 2; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="900" height="640"/>
+  <rect class="panel" x="24" y="24" width="852" height="592" rx="18" filter="url(#shadow)"/>
+
+  <text class="title" x="54" y="74">HOPE routing intuition</text>
+  <text class="subtitle" x="54" y="105">Interference helps before transmission, then hurts during decoding.</text>
+
+  <path class="baseline" d="M94 350 C220 170 490 128 790 160"/>
+  <text class="tiny" x="307" y="148">shortest / energy-only route</text>
+
+  <path class="route" d="M94 350 C210 318 294 310 382 294 C494 276 571 248 666 270 C720 282 764 245 800 198"/>
+  <text class="label" x="397" y="250">HOPE path</text>
+
+  <circle class="node" cx="94" cy="350" r="34"/>
+  <text class="label" x="59" y="410">Source</text>
+
+  <circle class="node" cx="382" cy="294" r="34"/>
+  <text class="label" x="347" y="355">Relay u</text>
+
+  <circle class="node" cx="666" cy="270" r="34"/>
+  <text class="label" x="631" y="331">Relay v</text>
+
+  <circle class="dest" cx="800" cy="198" r="36"/>
+  <text class="label" x="746" y="258">Destination</text>
+
+  <circle class="wave" cx="252" cy="234" r="54"/>
+  <circle class="wave" cx="252" cy="234" r="91"/>
+  <circle class="interferer" cx="252" cy="234" r="29"/>
+  <text class="label" x="205" y="189">Interferer</text>
+  <path class="energy" d="M276 254 C305 278 333 290 350 293"/>
+
+  <rect class="good" x="167" y="428" width="275" height="78" rx="12"/>
+  <text class="label" x="188" y="459">Near transmitter</text>
+  <text class="small" x="188" y="484">more harvestable RF energy</text>
+  <text class="tiny" x="188" y="503">large I_u lowers edge cost</text>
+
+  <circle class="wave" cx="614" cy="184" r="50"/>
+  <circle class="wave" cx="614" cy="184" r="84"/>
+  <circle class="interferer" cx="614" cy="184" r="29"/>
+  <text class="label" x="569" y="139">Interferer</text>
+  <path class="energy" d="M625 211 C630 232 641 248 654 258"/>
+
+  <rect class="bad" x="520" y="428" width="276" height="78" rx="12"/>
+  <text class="label" x="541" y="459">Near receiver</text>
+  <text class="small" x="541" y="484">more outage pressure</text>
+  <text class="tiny" x="541" y="503">large I_v raises edge cost</text>
+
+  <rect class="formula" x="116" y="536" width="668" height="52" rx="13"/>
+  <text class="small" x="139" y="568">HOPE weight: distance penalty × receiver interference ÷ transmitter harvest power</text>
+</svg>

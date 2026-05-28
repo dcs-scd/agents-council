@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Minimum-Latency Reliable Routing in Interference-Powered Networks</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #fbfaf7;
+  --paper: #fffdfa;
+  --ink: #1d1a17;
+  --muted: #746b60;
+  --line: #e8dfd3;
+  --accent: #cc5a1a;
+  --accent-soft: #fff2e8;
+  --code: #f3eee7;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+  line-height: 1.68;
+}
+.shell {
+  max-width: 840px;
+  margin: 0 auto;
+  padding: 56px 24px 72px;
+}
+article {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  padding: clamp(28px, 5vw, 58px);
+  box-shadow: 0 24px 60px rgba(52, 38, 24, 0.08);
+}
+.eyebrow {
+  color: var(--accent);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 14px;
+}
+h1 {
+  margin: 0 0 22px;
+  font-size: clamp(34px, 6vw, 58px);
+  line-height: 1.04;
+  font-weight: 760;
+  letter-spacing: 0;
+}
+.meta {
+  display: grid;
+  gap: 8px;
+  margin: 24px 0 38px;
+  padding: 18px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+}
+.meta div {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 16px;
+}
+dt {
+  color: var(--muted);
+  font-weight: 700;
+}
+dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+h2 {
+  margin: 44px 0 16px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 22px;
+  line-height: 1.25;
+  letter-spacing: 0;
+}
+h3 {
+  margin: 34px 0 10px;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 18px;
+  line-height: 1.35;
+  letter-spacing: 0;
+}
+p {
+  margin: 0 0 18px;
+  font-size: 18px;
+}
+.lede {
+  padding: 14px 16px;
+  background: var(--accent-soft);
+  border-left: 3px solid var(--accent);
+}
+code, .equation {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+code {
+  padding: 0.1em 0.32em;
+  background: var(--code);
+  border-radius: 4px;
+  font-size: 0.86em;
+}
+.equation {
+  margin: 18px 0 22px;
+  padding: 16px;
+  overflow-x: auto;
+  background: var(--code);
+  border: 1px solid var(--line);
+  font-size: 15px;
+}
+.paper-figure {
+  margin: 18px 0 30px;
+  padding: 14px;
+  background: #fff;
+  border: 1px solid var(--line);
+}
+.paper-figure img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.paper-figure figcaption {
+  margin-top: 10px;
+  color: var(--muted);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.paper-figure figcaption strong {
+  color: var(--ink);
+}
+.concept-figure {
+  margin-top: 22px;
+  padding: 0;
+  overflow: hidden;
+}
+.concept-figure img {
+  background: #fffaf2;
+}
+.concept-figure figcaption {
+  padding: 0 14px 14px;
+}
+@media (max-width: 640px) {
+  .shell { padding: 24px 12px 40px; }
+  article { padding: 24px 18px; border-left: 0; border-right: 0; }
+  .meta div { grid-template-columns: 1fr; gap: 2px; }
+  p { font-size: 17px; }
+}
+@media print {
+  body { background: white; }
+  .shell { max-width: none; padding: 0; }
+  article { border: 0; box-shadow: none; }
+}
+</style>
+</head>
+<body>
+<main class="shell">
+<article>
+<div class="eyebrow">ArXivIQ-style full review</div>
+<h1>Minimum-Latency Reliable Routing in Interference-Powered Networks</h1>
+<dl class="meta">
+<div><dt>Authors</dt><dd>Azadeh Sheikholeslami (Suffolk University)</dd></div>
+<div><dt>Paper</dt><dd>/home/dstefanescu/other_systems/o4/hope/Allerton_2025_Sheikholeslami.pdf</dd></div>
+<div><dt>Code</dt><dd>N/A</dd></div>
+<div><dt>Model</dt><dd>N/A</dd></div>
+</dl>
+<h2>TL;DR</h2>
+<p class="lede"><strong>WHAT was done?</strong> The paper introduces HOPE, Harvesting-Optimized Path selection with End-to-end outage guarantees, a joint routing and power-allocation method for multi-hop wireless networks whose relays must harvest RF energy from ambient interferers before they can transmit. The key result is a reduction: a min-max harvesting-latency problem with an end-to-end outage constraint becomes an ordinary shortest-path problem with an edge weight that rewards interference at the transmitter and penalizes interference at the receiver.</p>
+<p class="lede"><strong>WHY it matters?</strong> Most interference-aware routing treats jammers and uncontrolled transmitters as pure damage; most energy-harvesting routing treats energy availability as a separate resource constraint. HOPE collapses those two views into one design rule: in an RF-powered network, interference is not good or bad globally, but location-dependent. Near a transmitting relay it is useful fuel; near a receiving relay it is reliability debt. That reframe gives low-power sensor and IoT networks a tractable way to route through hostile or messy spectrum without pretending interference can simply be avoided.</p>
+<p class="lede"><strong>Executive summary:</strong> The paper's intellectual move is not a new harvester, radio, or MAC protocol. It is an optimization lens that turns the dual nature of interference into a computable graph geometry. Under Rayleigh fading, short-term energy buffering, and known average interference powers, HOPE assigns each directed link the weight <code>w_{u,v} = d_{u,v}^α (N_0 + I_v)/(N_0 + I_u)</code>, runs Dijkstra, and then sets relay powers so the outage budget is tight. In a 30-node, 20-interferer simulation, HOPE reaches 12.95 seconds of harvesting latency versus 39.44 seconds for minimum-energy routing and 593.3 seconds for shortest-path routing.</p>
+<h2>Details</h2>
+<h3>The Interference Sign Error in Conventional Routing</h3>
+<figure class="paper-figure concept-figure">
+<img src="allerton_2025_sheikholeslami_review_assets/hope-concept-diagram.svg" alt="Conceptual view. Interference is both fuel and risk." loading="lazy" />
+<figcaption>
+<strong>Conceptual view. Interference is both fuel and risk.</strong> HOPE's routing weight rewards transmitter-side interference because it shortens harvesting time, while penalizing receiver-side interference because it raises outage pressure. The chosen path is the one that balances those two effects, not merely the shortest or quietest path.
+</figcaption>
+</figure>
+<p>The paper starts from a subtle but important failure mode in wireless routing: interference is usually assigned one sign. In classical outage-aware or jamming-aware routing, interference is a cost because it lowers SINR at the receiver. In energy-harvesting wireless networks, however, the same RF field can also be a power source. Once relays have no long-term battery and must harvest before transmitting, avoiding every interferer can be just as harmful as moving too close to one.</p>
+<p>This makes the problem qualitatively different from shortest-path routing, minimum-energy routing, or ordinary outage-constrained routing. A path is not good because it is geometrically short, quiet, or low-power in isolation. It is good if the relays that must transmit can harvest quickly while the receivers that must decode remain reliable enough to satisfy a path-level outage guarantee. HOPE is built around that sign asymmetry. It asks where interference is useful and where it is damaging, then encodes that distinction directly into the graph.</p>
+<h3>First Principles: Bottleneck Latency, Not Total Energy</h3>
+<p>The latency objective is chosen carefully. All nodes on a candidate path begin harvesting at time zero, and the store-and-forward transmission can begin only after every transmitting node on the path has accumulated enough energy for its own hop. Because harvesting happens in parallel, the relevant delay is not the sum of relay charging times. It is the slowest relay:</p>
+<div class="equation">min_Π max_{u in Π} T_u</div>
+<p>subject to an end-to-end outage constraint <code>p_out^{SD} &lt;= π</code>. This is the right abstraction for the paper's short-term-buffer model. If one relay is energy-starved, the whole route waits; if several relays harvest quickly, their surplus does not compensate for the bottleneck relay unless storage and scheduling policies beyond the model are introduced.</p>
+<p>Energy neutrality gives the first half of the mechanism. If node <code>u</code> transmits at power <code>P_u</code> for duration <code>τ</code>, then <code>P_u τ</code> must be supplied by harvested RF energy. With conversion efficiency <code>η</code>, noise floor <code>N_0</code>, and average interference at the transmitter <code>I_u</code>, the paper obtains:</p>
+<div class="equation">T_u &gt;= P_u τ / (η(N_0 + I_u))</div>
+<p>This inequality is the first place where the sign of interference flips. More interference at the transmitter increases the denominator and reduces the harvesting time required for a given transmit power. The relay is still in a hostile spectrum, but it is also drinking from that spectrum.</p>
+<h3>The Outage Constraint Becomes a Routing Geometry</h3>
+<p>The second half of the mechanism is the outage reduction. For a path <code>Π</code>, the end-to-end outage is one minus the product of per-link success probabilities. Under the Rayleigh fading model and the paper's average-interference approximation, the multiplicative reliability condition can be transformed into an additive path budget:</p>
+<div class="equation">Σ_{(u,v) in Π} d_{u,v}^α (N_0 + I_v) / P_u &lt;= ε</div>
+<p>where <code>ε = -γ^{-1} ln(1 - π)</code>. This is the bridge from communications reliability to graph optimization. Receiver-side interference <code>I_v</code> now appears as a numerator term: it raises the power required to keep the hop reliable. Transmit power can reduce the reliability cost, but higher power also lengthens the harvesting time through the energy-neutrality constraint.</p>
+<p>For a fixed path, the KKT conditions force the optimal solution into a bottleneck-equalizing form: each transmitting node's energy-limited time constraint becomes tight. Substituting that structure into the outage budget yields the closed-form path latency:</p>
+<div class="equation">T(Π) = (τ / ηε) Σ_{(u,v) in Π} d_{u,v}^α (N_0 + I_v) / (N_0 + I_u)</div>
+<p>Since the front factor is independent of the route, the entire joint routing and power-allocation problem reduces to minimizing the sum of nonnegative edge weights:</p>
+<div class="equation">w_{u,v} = d_{u,v}^α (N_0 + I_v) / (N_0 + I_u)</div>
+<p>This is the paper's central object. It says that a link is expensive if it is long, if the receiver is noisy, or if the transmitter has little harvestable RF energy. It is cheap when the transmitter sits near useful RF energy and the receiver remains sufficiently protected. That is a much sharper rule than &quot;avoid jammers&quot; or &quot;minimize power.&quot;</p>
+<h3>The HOPE Mechanism: Dijkstra After the Physics</h3>
+<p>Once the edge weights are defined, HOPE itself is algorithmically simple. Precompute the average interference <code>I_v</code> at each node, set the outage-derived budget <code>ε</code>, assign every directed link its HOPE weight, and run Dijkstra from source to destination. After the path is selected, compute the bottleneck harvesting time</p>
+<div class="equation">T(Π*) = (τ / ηε) Σ_{(u,v) in Π*) w_{u,v}</div>
+<p>and set each transmitter power according to the tightness condition:</p>
+<div class="equation">P_u = η(N_0 + I_u)T(Π*) / τ</div>
+<p>The practical elegance is that the hard wireless-network coupling is pushed into the weight construction, not into an exotic search procedure. The resulting algorithm is explainable: every chosen edge reflects a physical tradeoff between path loss, receiver-side outage risk, and transmitter-side energy supply. It is also computationally conservative. The paper does not ask the network to solve a mixed-integer nonlinear program online; it asks it to maintain interference estimates and run a standard shortest-path routine.</p>
+<h3>Analysis: Why Minimum-Energy Routing Loses Here</h3>
+<figure class="paper-figure">
+<img src="allerton_2025_sheikholeslami_review_assets/fig-2-route-comparison.png" alt="Fig. 2. Route selection under interference-powered harvesting." loading="lazy" />
+<figcaption>
+<strong>Fig. 2. Route selection under interference-powered harvesting.</strong> A 30-node, 20-interferer network snapshot comparing HOPE, MER, and shortest-path routes. HOPE deliberately exploits the spatial distribution of interferers instead of simply avoiding them.
+</figcaption>
+</figure>
+<figure class="paper-figure">
+<img src="allerton_2025_sheikholeslami_review_assets/fig-3-interferer-scaling.png" alt="Fig. 3. Latency versus number of interferers." loading="lazy" />
+<figcaption>
+<strong>Fig. 3. Latency versus number of interferers.</strong> HOPE remains comparatively stable as interferer density rises, while MER latency increases because it treats interference primarily as a reliability burden rather than an energy source.
+</figcaption>
+</figure>
+<figure class="paper-figure">
+<img src="allerton_2025_sheikholeslami_review_assets/fig-4-node-scaling.png" alt="Fig. 4. Latency versus number of system nodes." loading="lazy" />
+<figcaption>
+<strong>Fig. 4. Latency versus number of system nodes.</strong> Both methods benefit from denser routing choices, but HOPE preserves a lower harvesting-latency curve across the tested network sizes.
+</figcaption>
+</figure>
+<p>The numerical section is small but coherent with the theory. The paper compares HOPE against shortest-path routing with uniform per-hop outage allocation and a minimum-energy routing baseline adapted from prior jamming-aware work. In the representative <code>10 x 10</code> deployment with 30 system nodes and 20 interferers, using <code>α = 2.5</code>, <code>N_0 = 1 W</code>, interferer power <code>P_i = 1 W</code>, <code>τ = 10 ms</code>, <code>η = 0.6</code>, and target outage probability <code>π = 0.1</code>, HOPE obtains 12.95 seconds of harvesting latency. MER needs 39.44 seconds. Shortest path needs 593.3 seconds.</p>
+<p>The reason is not that HOPE magically defeats interference. It chooses a different failure mode. Shortest-path routing ignores the energy/reliability coupling, so it can select relays that are geometrically convenient but energetically starved. MER minimizes transmit energy and therefore tends to route away from receiver-side interference; that reduces power expenditure but also deprives transmitters of RF energy that would have shortened the harvest phase. HOPE exploits the missing variable in MER: the denominator <code>N_0 + I_u</code>.</p>
+<p>The scaling plots reinforce the interpretation. As the number of interferers increases, MER latency rises because more interference forces greater transmit power to preserve outage performance. HOPE stays comparatively stable because the same additional RF field also increases harvestable energy at candidate transmitters. As the number of system nodes increases, both methods improve because denser graphs offer more routing choices, but HOPE remains lower across the tested range because it searches over a graph whose geometry is already matched to the RF-energy tradeoff.</p>
+<h2>Limitations</h2>
+<p>The reduction is clean because the model is clean. The paper assumes a static network with known node positions, known interferer positions or average interference powers, frequency-flat Rayleigh fading, omnidirectional antennas, and independent link outages. The outage transformation uses an average-interference characterization and a bound whose practical tightness will depend on the interference distribution, fading statistics, and how accurately the network can estimate <code>I_u</code> and <code>I_v</code>.</p>
+<p>The energy model is intentionally pessimistic: nodes have short-term buffering and do not accumulate useful energy across longer horizons. That makes the bottleneck-latency objective defensible for ultra-low-power devices with limited storage, but it leaves out policies that exploit historical energy accumulation, traffic scheduling, duty cycling, queueing, or finite-battery dynamics. The simulations are also stylized. Nodes and interferers are uniformly distributed in a square, the comparison set is narrow, and the paper does not include hardware measurements, nonlinear harvesting curves, MAC-layer contention, synchronization cost, mobility, bursty jammers, or adaptive adversaries.</p>
+<p>The most important deployment gap is state acquisition. HOPE is easy to run after the weights are known, but real networks still need to estimate and distribute interference information well enough to assign those weights. In a contested or mobile environment, that estimation problem may be the dominant cost.</p>
+<h2>Impact &amp; Conclusion</h2>
+<p>HOPE's value is the design principle it extracts: interference-aware routing for RF-powered networks should be sign-aware, not avoidance-first. The same interferer can be beneficial to a transmitter and harmful to a receiver, and the routing metric should preserve that asymmetry instead of collapsing it into a scalar penalty. The edge weight <code>d_{u,v}^α (N_0 + I_v)/(N_0 + I_u)</code> is a compact expression of that principle.</p>
+<p>For wireless sensor networks, disaster recovery links, industrial IoT, and contested-spectrum deployments, this offers a useful analytical core: choose paths whose transmitters are close enough to RF energy sources to charge quickly, but whose receivers are not so exposed that outage constraints collapse. The paper should not be oversold as a complete networking stack. It is a routing-and-power primitive under strong assumptions. But as a primitive, it is crisp: it turns the messy dual role of interference into a shortest-path geometry that engineers can reason about, simulate, and extend. The next serious test is whether this sign-aware routing rule survives realistic dynamics: imperfect interference maps, nonlinear harvesters, finite buffers, mobility, MAC overhead, and adversaries that react to the path rather than passively powering it.</p>
+</article>
+</main>
+</body>
+</html>
