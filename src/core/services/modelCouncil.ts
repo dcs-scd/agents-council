@@ -106,6 +106,22 @@ export type ModelCouncilConsensus = {
   notRatifiedReason?: string;
 };
 
+// Record of a consensus-repair cycle. The council reasons in prose, so members
+// who agree on substance routinely withhold ratification of the *exact* draft
+// pending specific edits ("ACCEPT after these changes"). When that happens, one
+// member synthesizes a revised artifact folding in the objections and the
+// council re-ratifies it once. This captures the pre-repair state for the audit
+// trail; the post-repair (decisive) values live on the parent result.
+export type ModelCouncilRepair = {
+  // The first-round ratifications that blocked the original candidate — each
+  // carries the member's stated objection / path-to-accept.
+  priorRatifications: ModelCouncilRatification[];
+  // The revised candidate synthesized from those objections, then re-ratified.
+  revisedCandidate: string;
+  // Which member synthesized the revision.
+  synthesizedBy: MemberRef;
+};
+
 export type ModelCouncilResult = {
   prompt: string;
   members: ModelCouncilMember[];
@@ -115,6 +131,10 @@ export type ModelCouncilResult = {
   candidateConsensus: string;
   converged: boolean;
   ratifications: ModelCouncilRatification[];
+  // Present only when a converged candidate was blocked and a single repair
+  // cycle ran. `candidateConsensus` and `ratifications` above are then the
+  // post-repair (decisive) values.
+  repair?: ModelCouncilRepair;
   consensus: ModelCouncilConsensus;
 };
 
@@ -264,21 +284,32 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
   const deliberations = finalRound?.proposals ?? [];
   const converged = Boolean(finalRound && isConverged(finalRound) && candidateConsensus.trim().length > 0);
 
-  const ratifications = converged
-    ? await Promise.all(
-        members.map(async (member) => {
-          const content = await askMember(
-            member,
-            buildRatificationMessages(prompt, rounds, candidateConsensus, member),
-          );
-          return {
-            member: toMemberRef(member),
-            content,
-            accepted: parseRatificationAccepted(content),
-          };
-        }),
-      )
-    : [];
+  let ratifications = converged ? await ratifyCandidate(members, prompt, rounds, candidateConsensus) : [];
+
+  // Consensus repair (one bounded cycle). The council reasons in prose, so two
+  // members who agree on substance routinely fail to emit byte-identical drafts
+  // and instead ratify "ACCEPT after these specific edits" as a BLOCK with a
+  // stated path-to-accept. A single ratify round throws that agreement away and
+  // records "blocked". When a converged candidate is blocked, let one designated
+  // member synthesize a revised artifact that folds in the blockers' objections,
+  // then re-ratify it once. If the revision still does not earn unanimous
+  // acceptance, the disagreement is real and the outcome stays "blocked".
+  let repair: ModelCouncilRepair | undefined;
+  if (shouldAttemptRepair(ratifications)) {
+    const synthesizer = members[0]!;
+    const revisedCandidate = parseCandidateConsensus(
+      await askMember(synthesizer, buildSynthesisMessages(prompt, candidateConsensus, ratifications, synthesizer)),
+    );
+    if (revisedCandidate.length > 0 && candidateChanged(candidateConsensus, revisedCandidate)) {
+      repair = {
+        priorRatifications: ratifications,
+        revisedCandidate,
+        synthesizedBy: toMemberRef(synthesizer),
+      };
+      ratifications = await ratifyCandidate(members, prompt, rounds, revisedCandidate);
+      candidateConsensus = revisedCandidate;
+    }
+  }
 
   return {
     prompt,
@@ -289,8 +320,38 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
     candidateConsensus,
     converged,
     ratifications,
+    repair,
     consensus: buildConsensusResult(ratifications, members, converged),
   };
+}
+
+// Ratify a single candidate artifact: every member independently votes
+// ACCEPT/BLOCK after reading the latest peer positions. Shared by the first
+// ratify round and the post-repair re-ratify so both use one implementation.
+async function ratifyCandidate(
+  members: ModelCouncilMember[],
+  prompt: string,
+  rounds: ModelCouncilRound[],
+  candidateConsensus: string,
+): Promise<ModelCouncilRatification[]> {
+  return Promise.all(
+    members.map(async (member) => {
+      const content = await askMember(member, buildRatificationMessages(prompt, rounds, candidateConsensus, member));
+      return {
+        member: toMemberRef(member),
+        content,
+        accepted: parseRatificationAccepted(content),
+      };
+    }),
+  );
+}
+
+// True when ratification ran and at least one member withheld acceptance. Such a
+// block is frequently conditional ("ACCEPT after these edits") rather than a hard
+// veto, so it is worth one synthesis-and-re-ratify repair cycle before recording
+// "blocked".
+export function shouldAttemptRepair(ratifications: ModelCouncilRatification[]): boolean {
+  return ratifications.length > 0 && ratifications.some((ratification) => !ratification.accepted);
 }
 
 // Format a convergence metric, tolerating transcripts written before these
@@ -383,7 +444,23 @@ export function formatModelCouncilMarkdown(result: ModelCouncilResult): string {
     }
   }
 
-  lines.push("", "## Peer Ratifications");
+  if (result.repair) {
+    lines.push(
+      "",
+      "## Consensus Repair",
+      "",
+      `The first ratification round blocked, but the objections came with a concrete path to accept. ${result.repair.synthesizedBy.name} synthesized a revised artifact folding in those edits, and the council re-ratified it (one bounded repair cycle).`,
+      "",
+      "### First-round objections",
+    );
+    for (const ratification of result.repair.priorRatifications) {
+      const verdict = ratification.accepted ? "ACCEPT" : "BLOCK";
+      lines.push("", `#### ${ratification.member.name} — ${verdict}`, "", ratification.content);
+    }
+    lines.push("", "### Revised candidate", "", result.repair.revisedCandidate);
+  }
+
+  lines.push("", result.repair ? "## Peer Ratifications (after repair)" : "## Peer Ratifications");
   if (result.ratifications.length > 0) {
     for (const ratification of result.ratifications) {
       const verdict = ratification.accepted ? "ACCEPT" : "BLOCK";
@@ -985,6 +1062,50 @@ export function buildRatificationMessages(
   ];
 }
 
+// Prompt one member to synthesize a single revised consensus artifact that folds
+// in every blocking ratifier's required edits. Used by the bounded repair cycle:
+// the members already agree on substance, so this resolves the residual "ACCEPT
+// after these edits" deltas into one artifact the council then re-ratifies.
+export function buildSynthesisMessages(
+  prompt: string,
+  candidateConsensus: string,
+  ratifications: ModelCouncilRatification[],
+  member: ModelCouncilMember,
+): ChatMessage[] {
+  const objections = ratifications
+    .filter((ratification) => !ratification.accepted)
+    .map((ratification) => [`## ${ratification.member.name}`, ratification.content].join("\n"))
+    .join("\n\n");
+  return [
+    {
+      role: "system",
+      content: [
+        `You are ${member.name}, synthesizing the final consensus artifact for a multi-agent council.`,
+        OBJECTIVE_CONSENSUS_DIRECTIVE,
+        "The peers agree on the substance, but at least one withheld ratification of the exact draft pending specific edits.",
+        "Produce a single revised candidate that incorporates every well-founded required edit while preserving everything the peers already endorsed.",
+        "Do not introduce new claims, do not weaken correctness to manufacture agreement, and keep any objection a peer raised on the merits if it is correct.",
+        "Your response must contain a CANDIDATE_CONSENSUS: section with the full revised artifact.",
+      ].join(" "),
+    },
+    {
+      role: "user",
+      content: [
+        "Original request:",
+        prompt,
+        "",
+        "Current candidate consensus artifact:",
+        candidateConsensus,
+        "",
+        "Peer objections and required edits (these withheld ratification):",
+        objections || "(none recorded)",
+        "",
+        "Return the revised artifact after a CANDIDATE_CONSENSUS: marker.",
+      ].join("\n"),
+    },
+  ];
+}
+
 function parseRatificationAccepted(content: string): boolean {
   const marker = content
     .split(/\r?\n/)
@@ -1002,21 +1123,25 @@ function parseCandidateConsensus(content: string): string {
   return content.slice(index + marker.length).trim();
 }
 
-function buildCandidateConsensus(proposals: ModelCouncilCandidateProposal[]): string {
-  const normalizedCandidates = new Set(
-    proposals
-      .map((proposal) => normalizeCandidate(proposal.candidateConsensus))
-      .filter((candidate) => candidate.length > 0),
-  );
-  if (normalizedCandidates.size === 1) {
-    return proposals.find((proposal) => proposal.candidateConsensus.trim().length > 0)?.candidateConsensus.trim() ?? "";
+export function buildCandidateConsensus(proposals: ModelCouncilCandidateProposal[]): string {
+  const drafts = proposals
+    .map((proposal) => proposal.candidateConsensus.trim())
+    .filter((candidate) => candidate.length > 0);
+  if (drafts.length === 0) {
+    return "";
   }
-  return [
-    "Candidate consensus is not yet unified. Peer candidate drafts:",
-    ...proposals.map((proposal) =>
-      [`## ${proposal.member.name} (${proposal.member.model})`, proposal.candidateConsensus.trim()].join("\n"),
-    ),
-  ].join("\n\n");
+  const normalizedCandidates = new Set(drafts.map((draft) => normalizeCandidate(draft)));
+  if (normalizedCandidates.size === 1) {
+    return drafts[0]!;
+  }
+  // The members agree substantively but their drafts are not byte-identical —
+  // verbose reasoners effectively never converge to identical prose. Emitting a
+  // stitched "not yet unified" blob here is fatal: it is unratifiable by
+  // construction (it literally announces its own non-unification, forcing every
+  // ratifier to BLOCK). Instead nominate the single most-complete draft as the
+  // candidate so the ratify phase votes on one coherent artifact; the repair
+  // cycle in runModelCouncil then folds in any peer-required edits.
+  return drafts.reduce((best, draft) => (draft.length > best.length ? draft : best));
 }
 
 function candidateChanged(previousCandidate: string, nextCandidate: string): boolean {

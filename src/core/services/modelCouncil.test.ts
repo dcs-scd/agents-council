@@ -4,16 +4,21 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import {
+  buildCandidateConsensus,
   buildDeliberationMessages,
   buildDefaultMembers,
   buildProposalMessages,
   buildRatificationMessages,
+  buildSynthesisMessages,
   flattenMessageContent,
+  formatModelCouncilMarkdown,
   resolveOpenRouterTimeoutMs,
   runModelCouncil,
   saveModelCouncilFailure,
+  shouldAttemptRepair,
   type ModelCouncilCandidateProposal,
   type ModelCouncilMember,
+  type ModelCouncilRatification,
   type ModelCouncilResponse,
   type ModelCouncilResult,
   type ModelCouncilRound,
@@ -218,6 +223,177 @@ describe("model council prompt protocol", () => {
     expect(user).toContain("Candidate consensus artifact to ratify");
     expect(user).toContain("Shared candidate");
     expect(user).not.toContain("Deliberation rounds:");
+  });
+});
+
+describe("model council consensus repair", () => {
+  test("candidate builder nominates the most complete draft when drafts are not identical", () => {
+    const shortDraft: ModelCouncilCandidateProposal = {
+      member: members[0]!,
+      content: "critique",
+      candidateConsensus: "Use option A.",
+    };
+    const longDraft: ModelCouncilCandidateProposal = {
+      member: members[1]!,
+      content: "critique",
+      candidateConsensus: "Use option A, because it minimizes latency and cost across every tier.",
+    };
+
+    const built = buildCandidateConsensus([shortDraft, longDraft]);
+
+    // The single most-complete draft is nominated — never the old un-ratifiable stitch.
+    expect(built).toBe(longDraft.candidateConsensus);
+    expect(built).not.toContain("not yet unified");
+    expect(built).not.toContain("Peer candidate drafts");
+  });
+
+  test("candidate builder returns the shared draft when every member is byte-identical", () => {
+    const draft = "Re-ground each tier's VICOM audit to its real decision surface.";
+    const proposals = members.map((member) => ({ member, content: "critique", candidateConsensus: draft }));
+
+    expect(buildCandidateConsensus(proposals)).toBe(draft);
+  });
+
+  test("repair is attempted only when ratification ran and at least one member blocked", () => {
+    const accept: ModelCouncilRatification = { member: members[0]!, content: "CONSENSUS: ACCEPT", accepted: true };
+    const block: ModelCouncilRatification = {
+      member: members[1]!,
+      content: "CONSENSUS: BLOCK\nReplace the 4.6 sentence.",
+      accepted: false,
+    };
+
+    expect(shouldAttemptRepair([])).toBe(false);
+    expect(shouldAttemptRepair([accept])).toBe(false);
+    expect(shouldAttemptRepair([accept, block])).toBe(true);
+  });
+
+  test("synthesis prompt folds blocking peers' objections into one revised candidate", () => {
+    const ratifications: ModelCouncilRatification[] = [
+      { member: members[0]!, content: "CONSENSUS: ACCEPT\nNo material change.", accepted: true },
+      { member: members[1]!, content: "CONSENSUS: BLOCK\nRequired edit: replace the 4.6 sentence.", accepted: false },
+    ];
+
+    const messages = buildSynthesisMessages("Review the tiers", "Current artifact text", ratifications, members[2]!);
+    const system = flattenMessageContent(messages[0]?.content ?? "");
+    const user = flattenMessageContent(messages[1]?.content ?? "");
+
+    expect(system).toContain("CANDIDATE_CONSENSUS");
+    expect(system).toContain("incorporates every well-founded required edit");
+    expect(user).toContain("Current artifact text");
+    // Only the blocking member's objection is carried in — accepting notes are not dragged in.
+    expect(user).toContain("replace the 4.6 sentence.");
+    expect(user).not.toContain("No material change.");
+  });
+
+  test("markdown surfaces the consensus repair cycle when one occurred", () => {
+    const result: ModelCouncilResult = {
+      prompt: "Review the tiers",
+      members,
+      responses,
+      deliberations: candidateProposals,
+      rounds,
+      candidateConsensus: "Revised shared candidate",
+      converged: true,
+      ratifications: members.map((member) => ({ member, content: "CONSENSUS: ACCEPT", accepted: true })),
+      repair: {
+        priorRatifications: [{ member: members[1]!, content: "CONSENSUS: BLOCK\nFix the 4.6 line.", accepted: false }],
+        revisedCandidate: "Revised shared candidate",
+        synthesizedBy: members[0]!,
+      },
+      consensus: {
+        reached: true,
+        outcome: "ratified",
+        ratifiedBy: members.map((member) => member.name),
+        blockedBy: [],
+      },
+    };
+
+    const markdown = formatModelCouncilMarkdown(result);
+
+    expect(markdown).toContain("## Consensus Repair");
+    expect(markdown).toContain("Fix the 4.6 line.");
+    expect(markdown).toContain("### Revised candidate");
+    expect(markdown).toContain("## Peer Ratifications (after repair)");
+  });
+
+  test("markdown omits the repair section for an ordinary single-round ratification", () => {
+    const result: ModelCouncilResult = {
+      prompt: "Review the tiers",
+      members,
+      responses,
+      deliberations: candidateProposals,
+      rounds,
+      candidateConsensus: "Shared candidate",
+      converged: true,
+      ratifications: members.map((member) => ({ member, content: "CONSENSUS: ACCEPT", accepted: true })),
+      consensus: {
+        reached: true,
+        outcome: "ratified",
+        ratifiedBy: members.map((member) => member.name),
+        blockedBy: [],
+      },
+    };
+
+    const markdown = formatModelCouncilMarkdown(result);
+
+    expect(markdown).not.toContain("## Consensus Repair");
+    expect(markdown).toContain("## Peer Ratifications");
+    expect(markdown).not.toContain("(after repair)");
+  });
+
+  test("a blocked candidate with a path-to-accept is repaired into a ratified consensus", async () => {
+    // Drive runModelCouncil end-to-end through the mock OpenRouter transport with
+    // a single member. Canned replies, in call order: proposal, deliberation
+    // (converges round 1), ratify (BLOCK with a required edit), synthesis
+    // (revised draft), re-ratify (ACCEPT). The pre-fix engine would have recorded
+    // "blocked"; the repair cycle must now reach "ratified".
+    const cannedByCall = [
+      "Initial independent answer.",
+      "Critique.\nCANDIDATE_CONSENSUS:\nDraft v1 recommends option A for every tier.",
+      "CONSENSUS: BLOCK\nRequired edit: also state the cost tradeoff before I can accept.",
+      "Synthesizing.\nCANDIDATE_CONSENSUS:\nDraft v2 recommends option A for every tier and states the cost tradeoff.",
+      "CONSENSUS: ACCEPT\nThe revision addresses my objection.",
+    ];
+    let callIndex = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => {
+        const content = cannedByCall[callIndex] ?? cannedByCall[cannedByCall.length - 1];
+        callIndex += 1;
+        return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+    const previousMembers = process.env.AGENTS_COUNCIL_MEMBERS;
+    const previousKey = process.env.OPENROUTER_API_KEY;
+    const previousUrl = process.env.AGENTS_COUNCIL_OPENROUTER_URL;
+    const previousTimeout = process.env.AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS;
+
+    process.env.AGENTS_COUNCIL_MEMBERS = "kimi";
+    process.env.OPENROUTER_API_KEY = "test-key";
+    process.env.AGENTS_COUNCIL_OPENROUTER_URL = server.url.toString();
+    process.env.AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS = "5000";
+
+    try {
+      const result = await runModelCouncil({ prompt: "Review the tiers" });
+
+      expect(result.converged).toBe(true);
+      expect(result.repair).toBeDefined();
+      expect(result.repair?.priorRatifications[0]?.accepted).toBe(false);
+      // The decisive candidate/ratifications are the post-repair values.
+      expect(result.candidateConsensus).toContain("Draft v2");
+      expect(result.candidateConsensus).toContain("cost tradeoff");
+      expect(result.ratifications.every((ratification) => ratification.accepted)).toBe(true);
+      expect(result.consensus.outcome).toBe("ratified");
+      expect(result.consensus.reached).toBe(true);
+    } finally {
+      server.stop(true);
+      restoreEnv("AGENTS_COUNCIL_MEMBERS", previousMembers);
+      restoreEnv("OPENROUTER_API_KEY", previousKey);
+      restoreEnv("AGENTS_COUNCIL_OPENROUTER_URL", previousUrl);
+      restoreEnv("AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS", previousTimeout);
+    }
   });
 });
 

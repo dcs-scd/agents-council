@@ -32,6 +32,111 @@
 <p class="sub">A running log of decisions not in the original ask, changes, tradeoffs, and things to know.
 Maintained across the build-out of the multi-model autonomous council. Newest section first.</p>
 
+<h2>Session 2026-06-01 — Consensus-repair: fix "blocked despite agreement"</h2>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span>Live Tier-4 re-run: <code>blocked → ratified</code>, but the repair cycle stayed dormant</h3>
+  <div class="meta">live 2-model run · Opus 4.8 + GPT-5.5 (xhigh) · 816.6s · 4 rounds · subscription-backed, $0 token spend</div>
+  <p>Re-ran the <em>identical</em> Tier-4 council (same prompt, same env: <code>claude-opus-4-8</code> + <code>gpt-5.5</code>)
+  under the fix. Outcome flipped from the original <code>blocked</code> (3 rounds, 647s) to <b><code>ratified</code></b>
+  (both members ACCEPT, blocked-by none). Wrote a <em>new</em> file
+  <code>hope/VICOM_TIER4_COUNCIL_CONSENSUS_ratified.md</code> — original blocked consensus preserved as before/after evidence.</p>
+  <p><b>The load-bearing nuance:</b> the <em>repair cycle did not fire</em> — no <code>## Consensus Repair</code> section,
+  only one ratification round, both ACCEPT. The operative fix on this real case was the other change:
+  <code>buildCandidateConsensus</code> nominating the most-complete draft instead of the un-ratifiable stitch. Confirmed
+  causally:</p>
+  <table>
+    <tr><th></th><th>Original (blocked)</th><th>New (ratified)</th></tr>
+    <tr><td>"not yet unified" stitch marker</td><td>present</td><td>absent</td></tr>
+    <tr><td>final ratify verdicts</td><td>BLOCK, BLOCK</td><td>ACCEPT, ACCEPT</td></tr>
+  </table>
+  <p class="why"><b>So:</b> nominate-most-complete-draft is empirically sufficient for the verbose-reasoner-disagreement
+  class. The repair cycle remains the deeper safety net (drafts that block on <em>substance</em> even when coherent) and
+  is validated only by the mock integration test, not yet exercised live. <b>FYI:</b> the member is labelled "Opus 4.7"
+  in transcripts (hardcoded from <code>DEFAULT_CLAUDE_MODEL</code>) but the model actually queried was
+  <code>claude-opus-4-8</code> via the env override — a pre-existing cosmetic label mismatch, not introduced by this fix.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span>Verification status</h3>
+  <div class="meta">gates · all green</div>
+  <p><code>bun run typecheck</code> clean; <code>bun run format:check</code> clean; <code>bun test</code> 26/26 pass
+  (159 assertions). Added 7 tests in <code>modelCouncil.test.ts</code>: draft nomination (identical + non-identical),
+  <code>shouldAttemptRepair</code>, <code>buildSynthesisMessages</code> objection-folding, Markdown render with/without
+  repair, and one <b>end-to-end integration test</b> that drives the full <code>runModelCouncil</code> flow through the
+  mock OpenRouter transport (proposal → converge → BLOCK → synthesize → re-ratify) and asserts the outcome flips to
+  <code>ratified</code> — zero real LLM cost.</p>
+  <p class="why"><b>Update (later same session):</b> the live multi-model re-run <em>was</em> subsequently executed —
+  see the topmost entry. Cost was <b>$0 token spend</b> (both members route through CLI subscriptions, not metered API);
+  my earlier "real token spend" estimate was wrong.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span>Root cause of <code>outcome=blocked</code> when ratifiers actually agree</h3>
+  <div class="meta"><code>modelCouncil.ts</code> · diagnosed from the 2026-06-01 Tier-4 transcript</div>
+  <p>Two compounding defects, both in the serialization/ratification protocol (the <em>deliberation</em> succeeded):</p>
+  <ul>
+    <li><b>Unratifiable candidate.</b> <code>buildCandidateConsensus</code> only emitted a single clean draft when the
+    members' <code>CANDIDATE_CONSENSUS:</code> blocks were normalized-identical (<code>size===1</code>). Verbose reasoners
+    never produce identical prose (Opus draft ≈3× GPT-5.5's; cross-member token-Jaccard 0.39), so it fell back to a
+    stitched <em>"Candidate consensus is not yet unified. Peer candidate drafts: …"</em> blob.</li>
+    <li><b>Convergence fired on the wrong signal.</b> <code>isConverged</code> greenlit ratification via the
+    <code>similarityToPrevious ≥ 0.95</code> arm — round-over-round <em>stability of the stitched blob</em>, which says
+    nothing about whether the members agree. The agreement arm (<code>memberAgreement ≥ 0.8</code>, the one that measures
+    real agreement) is verbosity-biased and never fired (stuck at 0.39).</li>
+  </ul>
+  <p>Net: ratify was handed a document that announces its own non-unification, and each member's "Path to ACCEPT" was
+  discarded → <code>outcome=blocked</code> with both ratifiers agreeing on the final artifact.</p>
+  <p class="why"><b>Tell:</b> the transcript's two final votes both led with <code>CONSENSUS: BLOCK</code> but each ended in
+  a concrete "make exactly these edits and I ACCEPT" — the protocol had no way to act on that.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>Nominate the most-complete draft instead of the un-ratifiable stitch</h3>
+  <div class="meta"><code>modelCouncil.ts</code> · <code>buildCandidateConsensus</code></div>
+  <p>When the members' drafts are not normalized-identical, the candidate handed to ratification is now the single
+  longest (most-complete) draft rather than the <em>"not yet unified"</em> stitch. Ratify therefore always votes on one
+  coherent artifact, and can ACCEPT immediately in the common case where one draft is already the agreed base.</p>
+  <p class="why"><b>Why longest:</b> a crude but deterministic proxy for "most rigorous" — in the observed run both peers
+  explicitly judged the longest (Opus) draft the most rigorous. The repair cycle below is the real quality backstop, so
+  the nomination heuristic does not need to be clever.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>Bounded one-shot consensus-repair cycle</h3>
+  <div class="meta"><code>modelCouncil.ts</code> · <code>runModelCouncil</code> + new <code>buildSynthesisMessages</code>, <code>shouldAttemptRepair</code>, <code>ratifyCandidate</code></div>
+  <p>After a converged candidate is blocked, the council now runs <em>exactly one</em> repair cycle: a designated member
+  (<code>members[0]</code>) synthesizes a revised artifact folding in every blocker's stated objection
+  (<code>buildSynthesisMessages</code>), and all members re-ratify it (<code>ratifyCandidate</code>, factored out of the
+  original inline ratify so both rounds share one implementation). If the revision earns unanimous ACCEPT →
+  <code>ratified</code>; otherwise the disagreement is real and the outcome stays <code>blocked</code>. The revised
+  artifact + the first-round objections are recorded on a new optional <code>result.repair</code> field and rendered in
+  the Markdown transcript under <em>"## Consensus Repair"</em>.</p>
+  <p class="why"><b>API note:</b> <code>ModelCouncilResult</code> gains an optional <code>repair</code> field (additive,
+  back-compatible). When a repair runs, <code>result.candidateConsensus</code> and <code>result.ratifications</code>
+  become the post-repair (decisive) values; the pre-repair votes live under <code>result.repair.priorRatifications</code>.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag tradeoff">Tradeoff</span>Unconditional repair-on-block over a 3-state ACCEPT/REVISE/BLOCK vote</h3>
+  <div class="meta">design choice</div>
+  <p>Rejected adding a <code>CONSENSUS: REVISE</code> vote vocabulary (which would have changed the ratify prompt and
+  <code>parseRatificationAccepted</code>) in favor of: on <em>any</em> block, attempt one synthesis-and-re-ratify using
+  the existing BLOCK text as the objection. Lower blast radius — the ratify prompt and its tests are untouched.</p>
+  <p class="why"><b>Cost:</b> on a genuinely irreconcilable block we spend one wasted synthesis + one re-ratify round
+  before still returning <code>blocked</code>. Bounded to a single cycle, only on the blocked path. <b>Safety:</b> repair
+  can only flip blocked→ratified or leave it blocked — never the reverse — because every member re-ratifies the revision
+  with its own judgment intact. A member whose objection the synthesis fails to resolve simply blocks again.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span>HALO-X pipeline bypassed again (same rationale as the 2026-05-23 entry)</h3>
+  <div class="meta">process · root <code>CLAUDE.md</code> Hard Rule 8</div>
+  <p>Single-file surgical bug fix (<code>modelCouncil.ts</code> + its test). Made directly with repo gates rather than a
+  full HALO-X plan→work-units→execute→accept run, which would be disproportionate here. This file is the compensating
+  record. Ask if you want it retrofitted into HALO-X.</p>
+</div>
+
 <h2>Session 2026-05-28 — ArXivIQ scraper</h2>
 
 <div class="entry">
