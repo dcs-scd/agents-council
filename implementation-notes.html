@@ -32,6 +32,151 @@
 <p class="sub">A running log of decisions not in the original ask, changes, tradeoffs, and things to know.
 Maintained across the build-out of the multi-model autonomous council. Newest section first.</p>
 
+<h2>Session 2026-06-02 — Dogfood eval of the consensus engine + two de-risking fixes</h2>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>WU-4 (F7): FACTUAL_ERROR / MATERIAL_DISAGREEMENT are absolute vetoes, and ratifiers are told to verify against the source</h3>
+  <div class="meta">2026-06-02 · <code>modelCouncil.ts</code> + <code>modelCouncil.test.ts</code> · 51/51 modelCouncil tests (full suite 62/62), typecheck clean</div>
+  <p>New <code>ABSOLUTE_VETO_KINDS = {FACTUAL_ERROR, MATERIAL_DISAGREEMENT}</code> + <code>isAbsoluteVeto()</code>. <code>shouldAttemptRepair</code> now returns <code>false</code> when any vote is such a veto — overriding any ACCEPT_WITH_EDITS — so synthesis/re-ratify is skipped and the outcome stays <code>blocked</code>. <code>buildConsensusResult</code> surfaces the veto in <code>notRatifiedReason</code> (e.g. <code>"unrepairable veto: FACTUAL_ERROR (raised by …)"</code>); repairable blocks leave it undefined. The ratification system prompt now instructs each member to check the artifact's factual/source-dependent claims against the source quoted in the original request and to vote FACTUAL_ERROR when a claim is contradicted, with a note that the two veto kinds are hard stops (so they aren't over-used in place of ACCEPT_WITH_EDITS).</p>
+  <p class="why"><b>Why:</b> closes the false-accept axis the dogfood exposed — two members can confidently agree on a wrong claim and there was no mechanism to stop it. <b>Verified end-to-end:</b> an integration test feeds one ACCEPT + one FACTUAL_ERROR with canned synthesis/re-ratify replies that <i>would</i> flip the outcome to <code>ratified</code> if repair ran — and asserts the outcome stays <code>blocked</code>, <code>repair</code> is undefined, and the mock's call counter stops at 6 (synthesis/re-ratify never dispatched). <b>Contract preserved:</b> <code>notRatifiedReason</code> is an already-optional field; CLI/MCP reads are unaffected.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">OFF-SPEC</span>WU-4 Part A: snippets are <i>already</i> in the ratify message — the gap was the instruction, not the data</h3>
+  <div class="meta">2026-06-02 · <code>buildRatificationMessages</code></div>
+  <p>The plan (WU-4) said to "inject the cited source snippets into the ratify user message." On inspection the ratify user message <b>already includes the original request verbatim</b> (<code>"Original request:" + prompt</code>), and <code>council-solve</code> inlines file contents into that prompt — so the source is already in front of every ratifier. Re-injecting it would duplicate ~50KB per ratify call. I therefore implemented Part A as a <i>verification instruction</i> pointing the ratifier at the already-present source, not as a second copy of the snippets.</p>
+  <p class="why"><b>Why:</b> the plan's premise (snippets absent from the ratify message) was factually wrong; the real defect was that nobody was told to check claims against the source. Fixing the actual gap with one prompt line is both correct and far cheaper than honoring the literal wording. Confidence: high — traced the <code>prompt</code> argument from <code>council-solve</code> → <code>runModelCouncil</code> → <code>ratifyCandidate</code> → <code>buildRatificationMessages</code> L1109-1110.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">FYI</span>Two items left for the user: the inverted verification capability, and a pre-existing CLI/MCP diff in the tree</h3>
+  <div class="meta">2026-06-02 · out-of-scope notes</div>
+  <p><b>(1) Deeper F7 inversion, deliberately out of scope.</b> The real verification asymmetry is structural: the tool-denied Claude chair authors the artifact, while the read-capable Codex member (the one that <i>could</i> open files) is never asked to verify. WU-4 makes verification a prompt duty for all members but does <b>not</b> re-architect the transports to route verification to the read-capable member — the plan explicitly parked that. Worth a follow-up if false-accepts persist.</p>
+  <p class="why"><b>(2)</b> <code>src/cli/index.ts</code> and <code>src/interfaces/mcp/server.ts</code> show as modified in <code>git status</code>, but <b>not by this work</b> — they are a pre-existing uncommitted diff (29 ins / 4 del) that predates the session and does not touch the consensus contract (no <code>accepted</code>/<code>outcome</code>/<code>ratifiedBy</code>/<code>blockedBy</code>/<code>vote</code> lines). Left untouched per surgical-changes. Flagging so they aren't mistaken for part of the F1–F7 bundle when you review the diff.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>WU-3 (F3): members self-report convergence; the token-overlap proxy is demoted to telemetry</h3>
+  <div class="meta">2026-06-02 · <code>modelCouncil.ts</code> + <code>modelCouncil.test.ts</code> · 45/45 modelCouncil tests (full suite 56/56), typecheck clean</div>
+  <p>The deliberation prompt now asks each member to emit <code>CONSENSUS_STATUS: CONVERGED|DIVERGED</code> and <code>MATERIAL_DISAGREEMENTS: &lt;list|NONE&gt;</code>. New exported <code>parseConsensusSignal()</code> reads them (tolerant glyph-stripping scan, mirroring the ratification parser). <code>isConverged</code> is rewritten to a 4-arm ladder: (1) byte-identical candidate, (2) round-to-round similarity ≥ threshold, (3) <b>PRIMARY</b> — every member that spoke reports CONVERGED with no material disagreement, (4) <b>FALLBACK</b> when no markers — average pairwise <i>overlap coefficient</i> of the drafts. An explicit DIVERGED / listed-disagreement suppresses the fallback. The Jaccard <code>memberAgreement</code> is no longer a convergence arm — kept only for the rendered Convergence table. No new LLM calls (the signal rides the existing deliberation turn).</p>
+  <p class="why"><b>Why overlap coefficient, not Jaccard, for the fallback:</b> Jaccard (∩/∪) is deflated when one draft is far longer than the other — exactly the verbose-prose case that produced the dogfooded <code>not_attempted</code>. Overlap (∩/min) is length-robust. <b>Verified:</b> the discriminating unit test pins a short draft fully contained in a long one — overlap = 1.0 converges where Jaccard ≈ 0.13 would not. <b>Note (post-F2):</b> <code>isConverged</code> now only governs early-stop, never whether ratification runs, so this change cannot regress a <code>ratified</code> outcome.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">OFF-SPEC</span>WU-3 markers ordered <i>before</i> <code>CANDIDATE_CONSENSUS:</code>, not after as the plan worded it</h3>
+  <div class="meta">2026-06-02 · <code>buildDeliberationMessages</code> prompt</div>
+  <p>The plan (WU-3) said "two markers <i>after</i> <code>CANDIDATE_CONSENSUS:</code>". I reversed the order: the prompt now puts <code>CONSENSUS_STATUS</code>/<code>MATERIAL_DISAGREEMENTS</code> first and <code>CANDIDATE_CONSENSUS:</code> last.</p>
+  <p class="why"><b>Why:</b> <code>parseCandidateConsensus</code> takes <i>everything</i> after the <code>CANDIDATE_CONSENSUS:</code> marker to end-of-content. Markers placed after it would be absorbed verbatim into the candidate artifact — polluting the rendered Consensus Answer and the longest-draft pick. Putting the candidate last keeps it the clean trailing block while <code>parseConsensusSignal</code> (which scans the whole message) still finds the markers. Pure prompt wording; no behavior beyond the plan's intent.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">DECISION</span>Exported <code>isConverged</code> and tested the convergence change as direct unit tests, not HTTP-harness integration</h3>
+  <div class="meta">2026-06-02 · 12 new tests (6 <code>parseConsensusSignal</code>, 6 <code>isConverged</code>)</div>
+  <p>WU-3's behavioral change is localized to <code>isConverged</code>. Rather than drive it through the <code>Bun.serve</code> mock + env-var harness (brittle, canned-reply-heavy), I exported <code>isConverged</code> and unit-tested it against hand-built rounds — consistent with this file's export-for-test pattern (<code>buildConsensusResult</code>, <code>parseRatificationVote</code>, <code>buildCandidateConsensus</code> are all already exported for tests).</p>
+  <p class="why"><b>Why:</b> the WU-2 integration test already exercises the end-to-end ratify path; a second HTTP run for an early-stop arm would add flakiness without coverage. Direct fixtures let each test pin one arm and assert the discriminator (e.g. "Jaccard-low but overlap-high → converges") cleanly. Trade: <code>isConverged</code> is now part of the test surface — acceptable, it's an internal helper, exporting it changes no runtime behavior.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">FYI</span>A pre-existing tracked 1.1MB artifact keeps <code>format:check</code> at exit 1 — not WU-3</h3>
+  <div class="meta">2026-06-02 · <code>harness/model_council_result_r5.json</code></div>
+  <p><code>bun run format:check</code> exits 1 solely because biome (<code>includes: ["**"]</code>) flags <code>harness/model_council_result_r5.json</code>, a <b>tracked, committed, unmodified</b> 1.1MB generated file outside <code>src/</code>. My two changed files are format-clean (verified by filtering biome output to them). I did <b>not</b> reformat the artifact: it is unrelated to this work and reformatting a 1.1MB generated JSON would be a large off-task diff (surgical-changes rule). <b>Gate read:</b> Gate-3's <code>format:check</code> is clean <i>for the code under change</i>; the non-zero exit is a pre-existing repo condition the user may want to address separately (gitignore the artifact or add a biome exclude). Also: <code>isConverged</code> is now exported (see DECISION above).</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>WU-2 (F2, the keystone): ratification is decoupled from the Jaccard convergence gate</h3>
+  <div class="meta">2026-06-02 · <code>modelCouncil.ts</code> + <code>modelCouncil.test.ts</code> · 33/33 tests, typecheck + format clean</div>
+  <p>In <code>runModelCouncil</code>, the ratify call now gates on <code>hasCandidate</code> (non-empty final candidate) instead of <code>converged</code>. <code>converged</code> (the Jaccard/agreement early-stop arms) is kept purely as transcript telemetry. <code>buildConsensusResult</code> now keys <code>not_attempted</code> on <code>ratifications.length === 0</code> — the only genuine "nobody voted" case — so a candidate that was actually voted on is always <code>ratified</code>/<code>blocked</code>.</p>
+  <p class="why"><b>Why this is the keystone:</b> it directly kills the dogfooded pathology — a run where members agree in substance but never cross the lexical threshold no longer skips ratification. <b>Verified end-to-end:</b> a new deterministic two-member integration test with zero-token-overlap drafts (no convergence arm can fire) now produces <code>converged=false</code> yet <code>outcome=ratified</code> — the exact pre-fix → post-fix flip. <b>Decisions:</b> minimal form only (ratify the final candidate; no per-round in-loop ratify rounds, which would cost N×(rounds−1) extra LLM calls at N=2); exported <code>buildConsensusResult</code> for a direct unit test (repo's export-for-test pattern); left the pre-existing unused <code>_members</code> param in place (not created by this change).</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>WU-1 (F1): ratification vote is now ternary — ACCEPT / ACCEPT_WITH_EDITS / BLOCK+kind</h3>
+  <div class="meta">2026-06-02 · <code>modelCouncil.ts</code> + <code>modelCouncil.test.ts</code> · 31/31 tests, typecheck + format clean</div>
+  <p>Added <code>RatificationVote</code> (<code>decision</code> + optional <code>blockKind</code> ∈ {MATERIAL_DISAGREEMENT, INSUFFICIENT_EVIDENCE, SYNTHESIS_ERROR, FACTUAL_ERROR, PROTOCOL} + <code>requiredEdits</code> + <code>raw</code>). <code>parseRatificationAccepted</code> → <code>parseRatificationVote</code> (tolerant symmetric scan; ACCEPT_WITH_EDITS matched before ACCEPT so the longer token wins; markerless → PROTOCOL block, not a silent substantive veto). Ratification prompt rewritten to the ternary grammar. Synthesis now feeds <code>requiredEdits</code> when present.</p>
+  <p class="why"><b>Decisions:</b> (1) kept <code>accepted: boolean</code> as a <i>derived</i> field (<code>decision==="accept"</code>) so <code>consensus.{reached,ratifiedBy,blockedBy}</code> and the CLI/MCP renderers need zero changes — blast radius stays inside two files. (2) <b>Deferred</b> the FACTUAL_ERROR/MATERIAL_DISAGREEMENT <i>absolute-veto</i> semantics to WU-4: WU-1 leaves <code>shouldAttemptRepair</code>/<code>buildConsensusResult</code> untouched (still key on derived <code>accepted</code>), so repair behavior is byte-for-byte preserved this WU. (3) kept <code>parseRatificationAccepted</code> as an exported thin wrapper so phase-(b)'s 5 marker tests stay green. (4) added a <code>ratification()</code> test helper (derives the vote via the parser) instead of hand-adding <code>vote</code> to 6 fixtures — per the repo's "shared helper over duplication" rule.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">DECISION</span>Phase (a) scope confirmed = core bundle F1+F2+F3+F7; canonical plan authored</h3>
+  <div class="meta">2026-06-02 · plan <code>docs/implementation/council-consensus-hardening/plan.md</code></div>
+  <p>User said "continue" → default scope, the core bundle. Authored a HALO-X-format plan (Objective / Invariants / WU-1..WU-4 / Acceptance Gates / Pipeline Handoff) matching this repo's <i>lightweight</i> local convention (the existing <code>three-agent-model-council</code> plan is 19 lines, WU-N + Gate-N — no perf/MDOC YAML), <b>not</b> the heavy hope-tree scaffolding. Dependency order F1→F2→F3→F7; all four work units edit one module so they are sequential, not parallel.</p>
+  <p class="why"><b>Why lightweight:</b> the heavy <code>acceptance_checklist/perf_budget/mdoc_targets/terminal_review/severity_floor</code> blocks defend perf budgets and MDOC scope that don't exist for a non-perf TS refactor; the local pipeline demonstrably accepts the light format. Adding speculative scaffolding violates simplicity-first. Risk (moderate): if this repo's acceptance gate has since adopted heavier enforcement, a missing block could BLOCK at end-of-build — a 2-minute add if so.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">FYI</span>Verified blast radius: the whole F1+F2+F3+F7 bundle is <b>two files, one module</b></h3>
+  <div class="meta">2026-06-02 · scoping grep over <code>src/</code></div>
+  <p>Confirmed <code>cli/index.ts</code> calls only <code>runModelCouncil</code>/<code>formatModelCouncilMarkdown</code>/save-helpers, and <code>server.ts:597</code> <code>formatModelCouncil</code> reads only <code>consensus.{reached,ratifiedBy,blockedBy}</code> + <code>ratifications[].{content,member}</code> — neither reads <code>.accepted</code>/<code>.outcome</code>. So the <code>accepted:boolean → vote</code> change (F1) and all of F2/F3/F7 stay inside <code>modelCouncil.ts</code> + <code>modelCouncil.test.ts</code>. Strategy: keep <code>accepted</code> as a derived field so no consumer breaks (minimal blast radius).</p>
+  <p class="why"><b>Why it matters for routing:</b> single-module, sequential-only stages negate HALO-X's main leverage (parallel work units in isolated worktrees). Flagged to the user that direct staged implementation may be cheaper than full HALO-X ceremony here; awaiting their call. Either way the plan/gates above are the spec.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">FYI</span>Dogfooding the 2-member council on its own <code>modelCouncil.ts</code> reproduced the engine's pathology live</h3>
+  <div class="meta">2026-06-02 19:44 UTC · read-only eval · transcript <code>deliberations/council-2026-06-02T19-44-29-497Z.md</code></div>
+  <p>Ran the two-member council (Opus 4.8 + GPT-5.5 @ xhigh) against the full engine source, asking it to critique its own consensus design (my own findings withheld so the run was a real rediscovery test). It ran the full 6 rounds, never converged, ratified nothing → outcome <code>not_attempted</code> — even though both members independently produced near-identical F1–F7 evaluations. Convergence forensics: <code>changed=yes</code> every round (arm 1 dead), <code>similarityToPrevious</code> peaked <b>0.937 &lt; 0.95</b> (arm 2), <code>memberAgreement</code> 0.267→0.339, never near <b>0.80</b> (arm 3). The mechanism cannot detect its own members' agreement on prose.</p>
+  <p class="why"><b>Why it matters:</b> the run is the existence proof for the ranked fixes — F1 ratification semantics / parser, F2 ratify-as-the-gate, F3 lexical metric is wrong, F7 no source-grounded verification (the run made 3 factual errors about its own source, none caught). Full diagnosis lives in the council transcript and in auto-memory <code>agents-council-engine-dogfood</code>; not duplicated here.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>Ratification parser no longer turns a formatted ACCEPT into a silent veto</h3>
+  <div class="meta">2026-06-02 · <code>src/core/services/modelCouncil.ts</code> · <code>parseRatificationAccepted</code> (now exported)</div>
+  <p>Was: take the <em>first non-empty line</em> and require a literal <code>^CONSENSUS: ACCEPT</code>. A bolded <code>**CONSENSUS: ACCEPT**</code>, a blockquoted/code-fenced marker, or one preamble line parsed as <b>BLOCK</b>. Now: scan for the first line bearing an explicit <code>CONSENSUS: ACCEPT|BLOCK</code> marker after stripping leading markdown glyphs (<code>* _ ` # &gt; -</code> + whitespace). A genuinely markerless reply still defaults to non-accept (unchanged). 5 new unit tests.</p>
+  <p class="why"><b>Why:</b> this is the cheap, unambiguous half of council finding F1 — the false-veto generator that bites hardest at N=2 (unanimity = no single veto). Deliberately did <em>not</em> add the ternary <code>ACCEPT_WITH_EDITS</code> vote here; that's the architectural part of F1, reserved for the HALO-X bundle.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>Markdown title now distinguishes <code>not_attempted</code> from <code>blocked</code></h3>
+  <div class="meta">2026-06-02 · <code>src/core/services/modelCouncil.ts</code> · <code>formatModelCouncilMarkdown</code></div>
+  <p>The H1 was a boolean on <code>consensus.reached</code>, so any non-ratified run — including <code>not_attempted</code> (ratification never ran) — rendered "<code># Council Consensus Blocked</code>". Now keyed on <code>consensus.outcome</code>: ratified → "Council Consensus", blocked → "…Blocked", not_attempted → "…Not Reached". 3 new tests.</p>
+  <p class="why"><b>Why:</b> the honest outcome trichotomy added in <code>d0becb9</code> was leaking back through the renderer — the dogfood run itself was titled "Blocked" when it was actually <code>not_attempted</code>. The council missed this (it worked from a "blocked" framing); caught in human review.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span>Did these two fixes directly; the architectural bundle goes through HALO-X</h3>
+  <div class="meta">2026-06-02 · routing call</div>
+  <p>Two one-function bugfixes with tests are bugfix-grade, not a staged/multi-file refactor, so they don't trip root Hard Rule 8 and routing them through the full HALO-X plan→work-units→execute→accept ceremony would be over-process. The remaining bundle (F1 ternary vote, F2 ratify-as-gate, F3 structured-metadata convergence signal, F5 merge-not-pick, F6 N=2 repair, F7 source-grounded verification) <em>is</em> a staged engine refactor and will be planned/executed under HALO-X (worktree-isolated).</p>
+  <p class="why"><b>Why:</b> KARPATHY surgical-changes + the subproject's own "Simplicity-first" rules vs. Hard Rule 8 — split on the bugfix-vs-refactor line. Verified: <code>bun run typecheck</code> clean, <code>bun test modelCouncil.test.ts</code> 24/24, <code>bun run format:check</code> clean.</p>
+</div>
+
+<h2>Session 2026-06-01 — Two-member default roster + always-on persistence</h2>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span>The default roster is now exactly two members: Opus 4.8 + GPT-5.5 (xhigh)</h3>
+  <div class="meta">2026-06-01 16:03 UTC · <code>src/core/services/modelCouncil.ts</code> · added <code>DEFAULT_MEMBER_IDS = ["claude","chatgpt"]</code></div>
+  <p>When <code>AGENTS_COUNCIL_MEMBERS</code> is unset, <code>selectConfiguredMembers</code> now returns exactly <code>claude</code> + <code>chatgpt</code> (was: all five — kimi/deepseek/gemini/chatgpt/claude). Claude is listed first so it chairs synthesis (<code>members[0]</code>). The wider roster is still fully reachable via the env var.</p>
+  <p class="why"><b>Why:</b> the ask was "a two-member version that has <em>only</em> Opus 4.8 and GPT-5.5" — the council the user invokes should <em>be</em> those two by default, not require an env var each time. Kept the env override so the change is non-destructive (no provider removed).</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span>Pinned Claude to <code>claude-opus-4-8</code> / label "Opus 4.8"</h3>
+  <div class="meta">2026-06-01 16:03 UTC · <code>DEFAULT_CLAUDE_MODEL</code> 4-7 → 4-8; member name "Opus 4.7" → "Opus 4.8"</div>
+  <p>GPT-5.5 + <code>xhigh</code> were already the defaults (<code>DEFAULT_CHATGPT_MODEL</code>/<code>DEFAULT_CHATGPT_REASONING_EFFORT</code>); only the Claude id/label moved.</p>
+  <p class="why"><b>Why:</b> the user explicitly requested "opus 4.8", so this <em>is</em> the instruction — Hard Rule 1 ("no model-id change without asking") is satisfied because the user asked. SDK model id confirmed as <code>claude-opus-4-8</code>.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>Persistence is now unconditional on every entry point, including failures</h3>
+  <div class="meta">2026-06-01 16:03 UTC · <code>src/cli/index.ts</code> (solve) + <code>src/interfaces/mcp/server.ts</code> (run_model_council)</div>
+  <p>Both entry points already auto-saved <em>successful</em> runs (<code>saveModelCouncilRun</code> → <code>deliberations/council-*.json</code> + <code>.md</code>). Added <code>saveModelCouncilFailure</code> to both catch blocks so a crashed/timed-out/aborted council also leaves a <code>council-failed-*.json/.md</code> transcript — mirroring what <code>scripts/council-solve.ts</code> already did.</p>
+  <p class="why"><b>Why:</b> the user emphasized "<em>always</em> persistent." Completed runs were covered; failed runs silently vanished on the CLI/MCP paths. Now every invocation leaves a durable record.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag tradeoff">Tradeoff</span>Roster override now respects the <em>listed</em> order (was source order)</h3>
+  <div class="meta">2026-06-01 16:03 UTC · unified <code>selectConfiguredMembers</code> on one <code>orderedByIds</code> helper</div>
+  <p>Collapsed the two prior code paths (unset → all members; set → <code>members.filter</code> in source order) into a single id-ordered mapping. <strong>Gained:</strong> the first member listed in <code>AGENTS_COUNCIL_MEMBERS</code> deterministically chairs synthesis, and one implementation instead of two. <strong>Gave up:</strong> the old implicit source-ordering for env users who listed members out of source order. Existing tests (<code>kimi,deepseek</code>) are unaffected because they happen to be in source order.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span>Did not route this through HALO-X; other providers untouched; binary rebuilt</h3>
+  <div class="meta">2026-06-01 16:03 UTC · gates: <code>typecheck</code> ✓ · <code>format:check</code> ✓ · <code>bun test</code> 27/27 ✓ · <code>dist/council</code> rebuilt (embeds <code>claude-opus-4-8</code>, 0× 4-7)</div>
+  <ul>
+    <li><b>HALO-X skipped (Hard Rule 8):</b> this is a ~5-file surgical default/config edit fully covered by the existing test suite; the worktree/plan/work-unit/acceptance ceremony would be disproportionate. Done directly with the standard verify loop.</li>
+    <li><b>No providers deleted:</b> kimi/deepseek/gemini and their model constants + runner functions remain wired and reachable via <code>AGENTS_COUNCIL_MEMBERS</code>.</li>
+    <li><b>Docs corrected:</b> README "Three-Agent" section → "Two-Member"; env table updated; also fixed a pre-existing doc/source mismatch (README claimed <code>AGENTS_COUNCIL_CHATGPT_MODEL</code> default <code>gpt-5.5-pro</code>; source is <code>gpt-5.5</code>). MCP tool + server descriptions updated to the two-member default.</li>
+  </ul>
+</div>
+
 <h2>Session 2026-06-01 — Consensus-repair: fix "blocked despite agreement"</h2>
 
 <div class="entry">

@@ -19,8 +19,14 @@ const DEFAULT_DEEPSEEK_MODEL = "deepseek/deepseek-v4-pro";
 const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash";
 const DEFAULT_CHATGPT_MODEL = "gpt-5.5";
 const DEFAULT_CHATGPT_REASONING_EFFORT = "xhigh" as const;
-const DEFAULT_CLAUDE_MODEL = "claude-opus-4-7";
+const DEFAULT_CLAUDE_MODEL = "claude-opus-4-8";
 const MEMBERS_ENV = "AGENTS_COUNCIL_MEMBERS";
+// Default council roster when AGENTS_COUNCIL_MEMBERS is unset: exactly two
+// members — Opus 4.8 (Claude) and GPT-5.5 at xhigh reasoning (ChatGPT/Codex).
+// Claude is listed first so it chairs synthesis (members[0]). Set
+// AGENTS_COUNCIL_MEMBERS to choose a wider roster, e.g.
+// "kimi,deepseek,gemini,chatgpt,claude".
+const DEFAULT_MEMBER_IDS = ["claude", "chatgpt"] as const;
 const OPENROUTER_TIMEOUT_ENV = "AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS";
 const OPENROUTER_URL_ENV = "AGENTS_COUNCIL_OPENROUTER_URL";
 const DEFAULT_OPENROUTER_TIMEOUT_MS = 300_000;
@@ -79,12 +85,43 @@ export type ModelCouncilRound = {
   // similarityToPrevious is null for the first round (no prior candidate).
   similarityToPrevious: number | null;
   // Average pairwise similarity of the members' own candidate drafts this round
-  // — rises as the members move toward agreement.
+  // (token-set Jaccard). Telemetry only as of F3 — no longer a convergence arm;
+  // isConverged now keys on the members' self-reported CONSENSUS_STATUS, falling
+  // back to a draft overlap coefficient. Kept for the rendered Convergence table.
   memberAgreement: number;
 };
 
+// A member's ratification verdict is ternary, not binary. ACCEPT_WITH_EDITS lets
+// a member who agrees on substance but wants specific edits register that without
+// it being read as a veto — the council folds the edits in via the repair cycle.
+// A BLOCK carries a kind so the engine can later distinguish a repairable
+// objection from an absolute veto (a factual error or material disagreement).
+export type RatificationDecision = "accept" | "accept_with_edits" | "block";
+
+export type RatificationBlockKind =
+  | "MATERIAL_DISAGREEMENT"
+  | "INSUFFICIENT_EVIDENCE"
+  | "SYNTHESIS_ERROR"
+  | "FACTUAL_ERROR"
+  | "PROTOCOL";
+
+export type RatificationVote = {
+  decision: RatificationDecision;
+  // Present only when decision === "block".
+  blockKind?: RatificationBlockKind;
+  // Present only when decision === "accept_with_edits": the edits the member
+  // requires before it will accept, fed into the repair synthesis.
+  requiredEdits?: string;
+  // The raw ratification text, retained for the transcript and debugging.
+  raw: string;
+};
+
 export type ModelCouncilRatification = ModelCouncilResponse & {
+  // Derived convenience (`vote.decision === "accept"`). Preserved so the public
+  // result contract (consensus.reached / ratifiedBy / blockedBy) and the CLI/MCP
+  // renderers — which read this, never `vote` — keep working unchanged.
   accepted: boolean;
+  vote: RatificationVote;
 };
 
 // Three-state outcome of the ratify phase:
@@ -282,9 +319,16 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
 
   const finalRound = rounds.at(-1);
   const deliberations = finalRound?.proposals ?? [];
+  // Telemetry only: did an early-stop arm fire? It no longer gates ratification.
   const converged = Boolean(finalRound && isConverged(finalRound) && candidateConsensus.trim().length > 0);
 
-  let ratifications = converged ? await ratifyCandidate(members, prompt, rounds, candidateConsensus) : [];
+  // F2: ratify whenever a non-empty candidate exists, NOT only when the Jaccard
+  // convergence gate fired. Verbose reasoners agree on substance without producing
+  // byte-identical or high-overlap drafts, so the old `converged ?` gate skipped
+  // ratification entirely and recorded `not_attempted` even when the members in
+  // fact agreed. The members' own ACCEPT/BLOCK votes are the real consensus test.
+  const hasCandidate = candidateConsensus.trim().length > 0;
+  let ratifications = hasCandidate ? await ratifyCandidate(members, prompt, rounds, candidateConsensus) : [];
 
   // Consensus repair (one bounded cycle). The council reasons in prose, so two
   // members who agree on substance routinely fail to emit byte-identical drafts
@@ -321,7 +365,7 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
     converged,
     ratifications,
     repair,
-    consensus: buildConsensusResult(ratifications, members, converged),
+    consensus: buildConsensusResult(ratifications, members),
   };
 }
 
@@ -337,21 +381,44 @@ async function ratifyCandidate(
   return Promise.all(
     members.map(async (member) => {
       const content = await askMember(member, buildRatificationMessages(prompt, rounds, candidateConsensus, member));
+      const vote = parseRatificationVote(content);
       return {
         member: toMemberRef(member),
         content,
-        accepted: parseRatificationAccepted(content),
+        accepted: vote.decision === "accept",
+        vote,
       };
     }),
+  );
+}
+
+// FACTUAL_ERROR and MATERIAL_DISAGREEMENT are absolute vetoes (F7): unlike a
+// repairable objection (INSUFFICIENT_EVIDENCE, SYNTHESIS_ERROR, or a bare BLOCK),
+// they cannot be resolved by folding in edits — no rewrite makes a false claim true
+// or dissolves a genuine substantive split — so they end the council at "blocked".
+const ABSOLUTE_VETO_KINDS: readonly RatificationBlockKind[] = ["FACTUAL_ERROR", "MATERIAL_DISAGREEMENT"];
+
+function isAbsoluteVeto(ratification: ModelCouncilRatification): boolean {
+  return (
+    ratification.vote.decision === "block" &&
+    ratification.vote.blockKind !== undefined &&
+    ABSOLUTE_VETO_KINDS.includes(ratification.vote.blockKind)
   );
 }
 
 // True when ratification ran and at least one member withheld acceptance. Such a
 // block is frequently conditional ("ACCEPT after these edits") rather than a hard
 // veto, so it is worth one synthesis-and-re-ratify repair cycle before recording
-// "blocked".
+// "blocked". An absolute veto (F7) is the exception: it overrides any
+// ACCEPT_WITH_EDITS and skips repair, because synthesis cannot clear it.
 export function shouldAttemptRepair(ratifications: ModelCouncilRatification[]): boolean {
-  return ratifications.length > 0 && ratifications.some((ratification) => !ratification.accepted);
+  if (ratifications.length === 0) {
+    return false;
+  }
+  if (ratifications.some(isAbsoluteVeto)) {
+    return false;
+  }
+  return ratifications.some((ratification) => !ratification.accepted);
 }
 
 // Format a convergence metric, tolerating transcripts written before these
@@ -392,7 +459,11 @@ function formatConvergenceTrend(rounds: ModelCouncilRound[]): string {
 // canonical Markdown renderer, shared by the CLI output and the saved record.
 export function formatModelCouncilMarkdown(result: ModelCouncilResult): string {
   const lines: string[] = [
-    result.consensus.reached ? "# Council Consensus" : "# Council Consensus Blocked",
+    result.consensus.outcome === "ratified"
+      ? "# Council Consensus"
+      : result.consensus.outcome === "blocked"
+        ? "# Council Consensus Blocked"
+        : "# Council Consensus Not Reached",
     "",
     `_Generated ${new Date().toISOString()}_`,
     "",
@@ -572,7 +643,7 @@ export function buildDefaultMembers(): ModelCouncilMember[] {
     },
     {
       id: "claude",
-      name: "Opus 4.7",
+      name: "Opus 4.8",
       provider: "claude",
       model: readEnv("AGENTS_COUNCIL_CLAUDE_MODEL") ?? DEFAULT_CLAUDE_MODEL,
     },
@@ -581,20 +652,25 @@ export function buildDefaultMembers(): ModelCouncilMember[] {
 }
 
 function selectConfiguredMembers(members: ModelCouncilMember[]): ModelCouncilMember[] {
+  const orderedByIds = (ids: readonly string[]): ModelCouncilMember[] =>
+    ids
+      .map((id) => members.find((member) => member.id === id || member.name.toLowerCase() === id))
+      .filter((member): member is ModelCouncilMember => member !== undefined);
+
   const raw = readEnv(MEMBERS_ENV);
-  if (!raw) {
-    return members;
-  }
-  const requested = raw
+  const requested = (raw ?? "")
     .split(",")
     .map((item) => item.trim().toLowerCase())
     .filter(Boolean);
+
+  // No override → the two-member Opus 4.8 + GPT-5.5 (xhigh) default roster.
   if (requested.length === 0) {
-    return members;
+    return orderedByIds(DEFAULT_MEMBER_IDS);
   }
-  const selected = members.filter(
-    (member) => requested.includes(member.id) || requested.includes(member.name.toLowerCase()),
-  );
+
+  // Override path: select in the order the caller listed them, so the first
+  // listed member chairs synthesis (members[0]).
+  const selected = orderedByIds(requested);
   if (selected.length === 0) {
     throw new Error(`${MEMBERS_ENV} did not match any council members: ${raw}`);
   }
@@ -996,7 +1072,7 @@ export function buildDeliberationMessages(
       ? formatCouncilResponses("Latest peer proposed candidate solutions", previousProposals)
       : "Latest peer proposed candidate solutions:\n(none yet)",
     "",
-    "Return your critique, then CANDIDATE_CONSENSUS: followed by the full candidate consensus text.",
+    "Return your critique, then CONSENSUS_STATUS: CONVERGED or DIVERGED, then MATERIAL_DISAGREEMENTS: a one-line list or NONE, and finally CANDIDATE_CONSENSUS: followed by the full candidate consensus text as the last section.",
   );
 
   return [
@@ -1009,6 +1085,7 @@ export function buildDeliberationMessages(
         "Challenge weak reasoning, adopt stronger reasoning from peers, and produce the exact candidate consensus text you would be willing to ratify.",
         "Name remaining disagreements only if they materially affect the final recommendation.",
         "Your response must contain a CANDIDATE_CONSENSUS: section with the full candidate answer. Keep the candidate unchanged if it is already the maximal solution.",
+        "Before the candidate, emit two marker lines: 'CONSENSUS_STATUS: CONVERGED' if the council now agrees and the candidate is ratifiable as-is, otherwise 'CONSENSUS_STATUS: DIVERGED'; and 'MATERIAL_DISAGREEMENTS:' followed by a one-line list of the substantive disagreements still blocking consensus, or NONE. Put the CANDIDATE_CONSENSUS: section last so the candidate text is captured cleanly.",
       ].join(" "),
     },
     {
@@ -1041,10 +1118,11 @@ export function buildRatificationMessages(
         `You are ${member.name}, one peer in a multi-agent consensus council. You are not a chair.`,
         OBJECTIVE_CONSENSUS_DIRECTIVE,
         "Decide whether the exact candidate consensus artifact has reached real consensus after reading the latest peer positions.",
-        "Return ACCEPT only if you can endorse the exact candidate consensus without material objection.",
-        "Return BLOCK if material disagreement remains, evidence is insufficient, or the proposed direction is weaker than an alternative.",
-        "Start your response with exactly one marker line: CONSENSUS: ACCEPT or CONSENSUS: BLOCK.",
-        "After the marker, state the consensus answer you accept, or the blocker that prevents consensus.",
+        "Vote one of three ways. ACCEPT: you endorse the exact artifact without material objection. ACCEPT_WITH_EDITS: you agree on the substance but require specific edits first — this is NOT a veto; the council will fold your edits in. BLOCK: consensus cannot be reached as-is.",
+        "Start your response with exactly one marker line, one of: 'CONSENSUS: ACCEPT', 'CONSENSUS: ACCEPT_WITH_EDITS', or 'CONSENSUS: BLOCK'.",
+        "If you vote ACCEPT_WITH_EDITS, follow the marker with a 'REQUIRED_EDITS:' line (or block) stating the exact edits you require.",
+        "If you vote BLOCK, follow the marker with a 'BLOCK_KIND:' line — one of MATERIAL_DISAGREEMENT, INSUFFICIENT_EVIDENCE, SYNTHESIS_ERROR, FACTUAL_ERROR, PROTOCOL — then explain the blocker. Use FACTUAL_ERROR only when the artifact states something contradicted by the evidence.",
+        "Check every factual and source-dependent claim in the artifact against the source material quoted in the original request above; if the artifact asserts something the source contradicts, vote BLOCK with BLOCK_KIND: FACTUAL_ERROR and quote the contradicting source. FACTUAL_ERROR and MATERIAL_DISAGREEMENT are absolute vetoes — they end the council at 'blocked' and cannot be cleared by edits, so reserve them for genuine hard stops, not for edits you could request via ACCEPT_WITH_EDITS.",
       ].join(" "),
     },
     {
@@ -1074,7 +1152,9 @@ export function buildSynthesisMessages(
 ): ChatMessage[] {
   const objections = ratifications
     .filter((ratification) => !ratification.accepted)
-    .map((ratification) => [`## ${ratification.member.name}`, ratification.content].join("\n"))
+    .map((ratification) =>
+      [`## ${ratification.member.name}`, ratification.vote.requiredEdits ?? ratification.content].join("\n"),
+    )
     .join("\n\n");
   return [
     {
@@ -1106,12 +1186,53 @@ export function buildSynthesisMessages(
   ];
 }
 
-function parseRatificationAccepted(content: string): boolean {
-  const marker = content
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
-  return /^CONSENSUS:\s*ACCEPT\b/i.test(marker ?? "");
+export function parseRatificationVote(content: string): RatificationVote {
+  // Scan for the first line that bears an explicit CONSENSUS marker, tolerating
+  // leading markdown glyphs (**bold**, > blockquote, `code`, # heading, - list)
+  // and a short preamble before the marker. A reasoner that bolds the marker or
+  // writes one line before it agrees on substance but was previously parsed as a
+  // silent BLOCK — the asymmetry that manufactured false vetoes at N=2. The
+  // ACCEPT_WITH_EDITS alternative is matched before ACCEPT so the longer token
+  // wins. A truly markerless response is a PROTOCOL block — a process failure the
+  // caller can re-ask, not a substantive veto.
+  const stripped = content.split(/\r?\n/).map((line) => line.trim().replace(/^[>*_`#\s-]+/, ""));
+  const markerLine = stripped.find((line) => /^CONSENSUS:\s*(ACCEPT_WITH_EDITS|ACCEPT|BLOCK)\b/i.test(line));
+  const marker = markerLine?.match(/^CONSENSUS:\s*(ACCEPT_WITH_EDITS|ACCEPT|BLOCK)\b/i)?.[1]?.toUpperCase();
+  if (marker === "ACCEPT") {
+    return { decision: "accept", raw: content };
+  }
+  if (marker === "ACCEPT_WITH_EDITS") {
+    const edits = content.match(/REQUIRED_EDITS:\s*([\s\S]*)$/i)?.[1]?.trim();
+    return { decision: "accept_with_edits", requiredEdits: edits || undefined, raw: content };
+  }
+  if (marker === "BLOCK") {
+    return { decision: "block", blockKind: parseBlockKind(stripped), raw: content };
+  }
+  return { decision: "block", blockKind: "PROTOCOL", raw: content };
+}
+
+const RATIFICATION_BLOCK_KINDS: readonly RatificationBlockKind[] = [
+  "MATERIAL_DISAGREEMENT",
+  "INSUFFICIENT_EVIDENCE",
+  "SYNTHESIS_ERROR",
+  "FACTUAL_ERROR",
+  "PROTOCOL",
+];
+
+// Read the BLOCK_KIND: line (if any), tolerating the same leading glyphs as the
+// marker scan. Returns undefined when no recognized kind is stated — a bare BLOCK.
+function parseBlockKind(strippedLines: string[]): RatificationBlockKind | undefined {
+  const kinds = RATIFICATION_BLOCK_KINDS.join("|");
+  const re = new RegExp(`^BLOCK_KIND:\\s*(${kinds})\\b`, "i");
+  const line = strippedLines.find((l) => re.test(l));
+  const kind = line?.match(re)?.[1]?.toUpperCase();
+  return RATIFICATION_BLOCK_KINDS.find((k) => k === kind);
+}
+
+// Back-compat boolean view of the vote (true iff a clean ACCEPT). Retained
+// because it is exported and unit-tested; new code reads parseRatificationVote.
+export function parseRatificationAccepted(content: string): boolean {
+  return parseRatificationVote(content).decision === "accept";
 }
 
 function parseCandidateConsensus(content: string): string {
@@ -1121,6 +1242,44 @@ function parseCandidateConsensus(content: string): string {
     return content.trim();
   }
   return content.slice(index + marker.length).trim();
+}
+
+// A member's self-reported convergence signal, parsed from the CONSENSUS_STATUS /
+// MATERIAL_DISAGREEMENTS markers it appends after its CANDIDATE_CONSENSUS. This is
+// the primary agreement signal (F3): a member declaring it has converged with no
+// material disagreements is a far more reliable consensus indicator than token
+// overlap, which is length-biased and systematically low for verbose prose.
+export type ConsensusReportStatus = "converged" | "diverged" | "unknown";
+
+export type ConsensusSignal = {
+  // "unknown" when the member emitted no CONSENSUS_STATUS marker (older transcript
+  // or a model that ignored the instruction) — callers fall back to draft overlap.
+  status: ConsensusReportStatus;
+  // True when the member listed at least one material disagreement (anything other
+  // than NONE). Suppresses convergence even if status parsed as CONVERGED.
+  hasMaterialDisagreements: boolean;
+  // The raw one-line disagreement list (or "" / "NONE"), retained for telemetry.
+  disagreements: string;
+};
+
+export function parseConsensusSignal(content: string): ConsensusSignal {
+  // Mirror parseRatificationVote's tolerant scan: strip leading markdown glyphs so
+  // a bolded / blockquoted / list-item marker still parses.
+  const lines = content.split(/\r?\n/).map((line) => line.trim().replace(/^[>*_`#\s-]+/, ""));
+  const statusRe = /^CONSENSUS_STATUS:\s*(CONVERGED|DIVERGED)\b/i;
+  const statusToken = lines
+    .find((line) => statusRe.test(line))
+    ?.match(statusRe)?.[1]
+    ?.toUpperCase();
+  const status: ConsensusReportStatus =
+    statusToken === "CONVERGED" ? "converged" : statusToken === "DIVERGED" ? "diverged" : "unknown";
+  const disagreements =
+    lines
+      .find((line) => /^MATERIAL_DISAGREEMENTS:/i.test(line))
+      ?.replace(/^MATERIAL_DISAGREEMENTS:\s*/i, "")
+      .trim() ?? "";
+  const hasMaterialDisagreements = disagreements.length > 0 && !/^NONE$/i.test(disagreements);
+  return { status, hasMaterialDisagreements, disagreements };
 }
 
 export function buildCandidateConsensus(proposals: ModelCouncilCandidateProposal[]): string {
@@ -1152,19 +1311,25 @@ function normalizeCandidate(candidate: string): string {
   return candidate.trim().replace(/\s+/g, " ");
 }
 
-// A round is converged once any of three arms fire:
-//   1. byte-identical to the previous round's shared candidate (changed === false);
-//   2. the shared candidate is near-identical between rounds (similarityToPrevious
-//      ≥ DEFAULT_CONVERGENCE_SIMILARITY_THRESHOLD) — fast-path for verbose models
-//      that effectively never produce byte-identical drafts;
-//   3. the members' own candidate drafts agree with each other within this round
-//      (memberAgreement ≥ DEFAULT_CONVERGENCE_AGREEMENT_THRESHOLD) — measures the
-//      thing we actually care about ("do the members agree?"), which the previous
-//      sim-only criterion did not directly capture.
-// Either of (2) or (3) firing means convergence; this is a strict superset of the
-// previous behavior. See council_output_shape_bugs_proposal.md (Bug 3) for why
-// the sim-only arm was insufficient.
-function isConverged(round: ModelCouncilRound): boolean {
+// A round is converged once any arm fires (strict superset of the old behavior):
+//   1. byte-identical shared candidate between rounds (changed === false);
+//   2. the shared candidate is near-identical round-to-round (similarityToPrevious
+//      ≥ DEFAULT_CONVERGENCE_SIMILARITY_THRESHOLD) — the candidate has stabilized;
+//   3. PRIMARY (F3): the members self-report agreement via CONSENSUS_STATUS — every
+//      member that spoke says CONVERGED and none lists a material disagreement.
+//      Self-report beats token overlap, which is length-biased and systematically
+//      low for the prose the council reasons in;
+//   4. FALLBACK (F3): when no member emitted the markers, fall back to draft
+//      agreement measured by the overlap coefficient (less length-biased than the
+//      Jaccard memberAgreement, which is now kept only as a telemetry metric).
+// An explicit DIVERGED / material-disagreement report suppresses the draft-overlap
+// fallback — a member that says it still disagrees should not be early-stopped by
+// lexical coincidence — but the candidate-stability arms (1–2) still short-circuit,
+// since a frozen artifact is ratify-ready and any residual objection surfaces as a
+// BLOCK at ratification. NOTE: post-F2 this gate only controls early-stop (whether
+// the loop breaks before maxRounds); it no longer decides whether ratification
+// runs, so loosening or tightening it cannot change a ratified outcome.
+export function isConverged(round: ModelCouncilRound): boolean {
   if (!round.changed) {
     return true;
   }
@@ -1172,11 +1337,21 @@ function isConverged(round: ModelCouncilRound): boolean {
   if (round.similarityToPrevious !== null && round.similarityToPrevious >= simThreshold) {
     return true;
   }
-  const agreementThreshold = resolveConvergenceAgreementThreshold();
-  if (Number.isFinite(round.memberAgreement) && round.memberAgreement >= agreementThreshold) {
+  // Structured self-reported signal (F3), primary over any lexical proxy.
+  const signals = round.proposals.map((proposal) => parseConsensusSignal(proposal.content));
+  if (signals.some((signal) => signal.status === "diverged" || signal.hasMaterialDisagreements)) {
+    return false;
+  }
+  if (signals.length > 0 && signals.every((signal) => signal.status !== "unknown")) {
     return true;
   }
-  return false;
+  // No member emitted the markers — fall back to draft overlap (overlap coefficient,
+  // not the demoted Jaccard memberAgreement).
+  const agreementThreshold = resolveConvergenceAgreementThreshold();
+  const draftOverlap = averagePairwiseOverlap(
+    round.proposals.map((proposal) => proposal.candidateConsensus || proposal.content),
+  );
+  return Number.isFinite(draftOverlap) && draftOverlap >= agreementThreshold;
 }
 
 function resolveMaxRounds(): number {
@@ -1249,15 +1424,50 @@ function averagePairwiseSimilarity(texts: string[]): number {
   return pairs === 0 ? 1 : sum / pairs;
 }
 
-function buildConsensusResult(
+// Overlap coefficient |A∩B| / min(|A|,|B|) in [0, 1]. Used as the F3 convergence
+// fallback because, unlike Jaccard, it is not deflated when one draft is far longer
+// than the other — the dominant failure mode for verbose council members.
+function overlapCoefficient(a: string, b: string): number {
+  const setA = tokenSet(a);
+  const setB = tokenSet(b);
+  if (setA.size === 0 && setB.size === 0) {
+    return 1;
+  }
+  const [smaller, larger] = setA.size <= setB.size ? [setA, setB] : [setB, setA];
+  let intersection = 0;
+  for (const token of smaller) {
+    if (larger.has(token)) {
+      intersection++;
+    }
+  }
+  return smaller.size === 0 ? 0 : intersection / smaller.size;
+}
+
+function averagePairwiseOverlap(texts: string[]): number {
+  const usable = texts.filter((text) => text.trim().length > 0);
+  if (usable.length < 2) {
+    return 1;
+  }
+  let sum = 0;
+  let pairs = 0;
+  for (let i = 0; i < usable.length; i++) {
+    for (let j = i + 1; j < usable.length; j++) {
+      sum += overlapCoefficient(usable[i]!, usable[j]!);
+      pairs++;
+    }
+  }
+  return pairs === 0 ? 1 : sum / pairs;
+}
+
+export function buildConsensusResult(
   ratifications: ModelCouncilRatification[],
   _members: ModelCouncilMember[],
-  converged: boolean,
 ): ModelCouncilConsensus {
-  if (!converged) {
-    // Ratify never ran; no member actually voted. Returning the full member
-    // list under `blockedBy` (as the prior implementation did) was a lie —
-    // it made non-convergence indistinguishable from unanimous rejection.
+  if (ratifications.length === 0) {
+    // Ratify never ran — no non-empty candidate ever emerged, so no member voted.
+    // This is now the ONLY genuine "not_attempted": a low Jaccard score no longer
+    // suppresses ratification (see F2 in runModelCouncil), so any candidate the
+    // members actually voted on is ratified/blocked, never silently not_attempted.
     return {
       reached: false,
       outcome: "not_attempted",
@@ -1273,11 +1483,18 @@ function buildConsensusResult(
     .filter((ratification) => !ratification.accepted)
     .map((ratification) => ratification.member.name);
   const reached = blockedBy.length === 0 && ratifiedBy.length === ratifications.length;
+  if (reached) {
+    return { reached: true, outcome: "ratified", ratifiedBy, blockedBy };
+  }
+  // Blocked. If the block is an absolute veto (F7), say so in the reason so the
+  // outcome is self-explaining — a hard stop, not a repairable "ACCEPT after edits".
+  const veto = ratifications.find(isAbsoluteVeto);
   return {
-    reached,
-    outcome: reached ? "ratified" : "blocked",
+    reached: false,
+    outcome: "blocked",
     ratifiedBy,
     blockedBy,
+    ...(veto ? { notRatifiedReason: `unrepairable veto: ${veto.vote.blockKind} (raised by ${veto.member.name})` } : {}),
   };
 }
 
