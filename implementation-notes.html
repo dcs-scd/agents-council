@@ -32,6 +32,50 @@
 <p class="sub">A running log of decisions not in the original ask, changes, tradeoffs, and things to know.
 Maintained across the build-out of the multi-model autonomous council. Newest section first.</p>
 
+<h2>Session 2026-06-05 — Fix council under-scoping (prompt-scope &amp; loaded-context lever, not sandbox reach)</h2>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>Solve-path Claude member is now told up front that tools are disabled (deny-loop hard-crash fix)</h3>
+  <div class="meta">2026-06-05 16:55 · <code>src/core/services/modelCouncil.ts</code> (<code>askClaude</code>) · typecheck 0, format clean, 51/51 modelCouncil tests; confirmed live (path-rich prompt completes instead of exit-1)</div>
+  <p>Discovered while re-running the FlashLib eval: a file-path-rich <code>council solve</code> prompt crashed the council twice, deterministically, with "Claude Code process exited with code 1" (the SDK swallows the child's real error). Root cause: the solve-path member is spawned with <code>canUseTool: deny</code> but its system prompt never says so, so a prompt that names repo paths makes the member attempt crawls, hit repeated denials, and churn the agent loop until the child dies/hangs. Micro-prompt + v1 (self-contained) worked; v2 (path-rich) didn't. Fix: <code>askClaude</code> now prepends a "you have no tools / reason only from this text / paths are labels not invitations" notice to the composed prompt. The identical prompt then ratified cleanly.</p>
+  <p class="why">Prevents a hard crash automatically on every solve run, not just when the prompt author remembers to forbid tools.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span>Deny-loop fix placed in <code>askClaude</code>, NOT the shared directive — summon path left untouched</h3>
+  <div class="meta">2026-06-05 16:55 · routing call</div>
+  <p>The shared <code>OBJECTIVE_CONSENSUS_DIRECTIVE</code> feeds both the <code>solve</code> members AND the desktop/MCP <code>summon</code> members. Verified <code>summon.ts</code> (line ~610) <em>intentionally allows</em> council/read tools via <code>isSummonToolAllowed</code> with MCP servers + a working directory — so a blanket "you have no tools" line in the shared array would be wrong there. All four solve phases (propose/deliberate/ratify/repair) route through <code>askClaude</code>, so injecting the notice there is one surgical edit that covers the entire affected path and nothing else. Confidence: high.</p>
+  <p class="why">Don't break the tool-using summon council to fix the text-only solve council.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>Two scope-challenge directives added to <code>OBJECTIVE_CONSENSUS_DIRECTIVE</code></h3>
+  <div class="meta">2026-06-05 15:48 · <code>src/core/services/council/objectiveConsensusPrompt.ts</code> · typecheck 0, format:check clean, 54/54 council tests</div>
+  <p>Diagnosis (from the 2026-06-05 FlashLib run): council verdict quality is bottlenecked by the prompt's <em>scope</em> and the <em>context the author embeds</em>, not by the members' filesystem/sandbox reach — members run read-only, network-off, cwd'd into this repo, and decline to crawl. The first fix is member-side: two directives that make members (1) name the framing/layer the prompt assumes and the strongest alternative it excluded, answering the broader question when it would change the recommendation, and (2) treat any single foregrounded gate (hardware/cost/scale/feasibility) as a hypothesis to test per sub-case rather than a settled dominant fact. Added to the shared directive array, so it propagates to all 6 prompt-assembly sites (propose/deliberate/ratify in <code>modelCouncil.ts</code> + 2 in <code>summon.ts</code>) with zero new wiring.</p>
+  <p class="why">Makes under-scoping self-correcting at runtime: a member now surfaces "you scoped this to runtime hot-paths; the answer lives in the offline analytics layer" instead of silently inheriting the frame — exactly the FlashLib v1 failure.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span>"Writing a good <code>council solve</code> prompt" checklist added to docs</h3>
+  <div class="meta">2026-06-05 15:48 · <code>docs/council.md</code> (before <code>## Tools (v2)</code>)</div>
+  <p>Author-side companion: a 4-point checklist (scope to the layer where the answer lives; don't pre-pin a dominant variable; pre-fetch &amp; embed external facts since members have no network; load intent not just bytes). Points to the user memory note <code>feedback_council_prompt_scoping_dominates</code>.</p>
+  <p class="why">The "context you load" half of the lever CANNOT be fixed at runtime — members can't reach the network, so only the author can embed it. The doc is the sole control point for that half; it is not redundant with the member-side directive.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span>Did not route through HALO-X despite root Hard Rule 8</h3>
+  <div class="meta">2026-06-05 15:48 · routing call</div>
+  <p>Rule 8 makes HALO-X the default for "multi-file implementation / refactor / staged build." This change is a 2-line addition to an existing string array plus one doc section — the "one-line fix / docs" class that Karpathy and ANDREESSEN Section B both exempt. Forcing the HALO-X worktree → plan → work-units → execute → acceptance ceremony onto a 2-line prompt-string edit is disproportionate over-process. Verified instead via the project's own required checks. Confidence: high.</p>
+  <p class="why">Proportionality; the simplification guardrails exist precisely to stop ceremony from swamping micro-edits.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag tradeoff">FYI</span><code>dist</code> rebuild deferred until the in-flight council run exits</h3>
+  <div class="meta">2026-06-05 15:48 · <code>dist/council</code></div>
+  <p>The fix is in source and verified, but <code>./dist/council</code> is the compiled binary future runs invoke, and a v2 FlashLib council run (PID 993875) is still executing it. Rebuilding (<code>bun run build</code>) while it runs risks <code>ETXTBSY</code>/SIGBUS. The fix is NOT live until the run exits and <code>bun run build</code> is re-run. The in-flight run itself still uses the OLD directive (it loaded the binary before this edit).</p>
+  <p class="why">Don't corrupt a running executable; build after it exits.</p>
+</div>
+
 <h2>Session 2026-06-02 — Dogfood eval of the consensus engine + two de-risking fixes</h2>
 
 <div class="entry">

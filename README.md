@@ -244,25 +244,35 @@ These settings are optional. By default, Agents Council uses the bundled Codex C
 - `send_response`: Submit feedback to a specific `session_id`.
 - `close_council`: End a specific `session_id` with a conclusion.
 - `summon_agent`: Summon Claude or Codex into the current council.
-- `run_model_council`: Ask Kimi 2.6, DeepSeek V4 Pro, and ChatGPT 5.5 Pro to propose, deliberate, and independently ratify or block consensus.
+- `run_model_council`: Ask Opus 4.8 and GPT-5.5 (xhigh) to propose, deliberate over rounds until consensus, and independently ratify or block it.
 
-### Three-Agent Model Council
+### Two-Member Model Council
 
-Run Kimi 2.6 and DeepSeek V4 Pro through OpenRouter, with ChatGPT 5.5 Pro through your locally authenticated Codex/OpenAI subscription path. The agents iterate on a candidate consensus until it stabilizes, then each agent independently ratifies or blocks it:
+By default the council has exactly two members — **Opus 4.8** through your locally authenticated Anthropic (Claude Code) subscription, and **GPT-5.5** at **xhigh** reasoning through your locally authenticated Codex/OpenAI subscription. No OpenRouter key is needed. The members iterate on a candidate consensus until it stabilizes, then each independently ratifies or blocks it. Every run is persisted automatically (success and failure alike) under `deliberations/` as a `.json` transcript plus a `.md` answer:
+
+```bash
+codex login   # GPT-5.5 (xhigh) via your OpenAI/Codex subscription
+claude         # Opus 4.8 via your Anthropic (Claude Code) subscription
+council solve "Decide the best architecture for ..."
+```
+
+To widen the roster, set `AGENTS_COUNCIL_MEMBERS` (the first listed member chairs synthesis). Adding `kimi`/`deepseek`/`gemini` requires an OpenRouter key:
 
 ```bash
 export OPENROUTER_API_KEY="..."
-codex login
+export AGENTS_COUNCIL_MEMBERS="claude,chatgpt,kimi,deepseek,gemini"
 council solve "Decide the best architecture for ..."
 ```
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `OPENROUTER_API_KEY` | required | OpenRouter API key for Kimi and DeepSeek |
+| `AGENTS_COUNCIL_MEMBERS` | `claude,chatgpt` | Council roster, comma-separated; first listed chairs synthesis |
+| `AGENTS_COUNCIL_CLAUDE_MODEL` | `claude-opus-4-8` | Anthropic (Claude Code) subscription model name |
+| `AGENTS_COUNCIL_CHATGPT_MODEL` | `gpt-5.5` | Codex/OpenAI subscription model name |
+| `OPENROUTER_API_KEY` | required only for `kimi`/`deepseek` | OpenRouter API key |
 | `OPENROUTER_HTTP_REFERER` | (unset) | Optional OpenRouter referer header |
 | `AGENTS_COUNCIL_KIMI_MODEL` | `moonshotai/kimi-k2.6` | OpenRouter Kimi model ID |
 | `AGENTS_COUNCIL_DEEPSEEK_MODEL` | `deepseek/deepseek-v4-pro` | OpenRouter DeepSeek model ID |
-| `AGENTS_COUNCIL_CHATGPT_MODEL` | `gpt-5.5-pro` | Codex/OpenAI subscription model name |
 
 ---
 

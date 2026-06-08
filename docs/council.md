@@ -112,6 +112,19 @@ For implementation guidance, use:
 - `docs/ui-spec.md` as the canonical UI specification
 - `docs/ui-implementation-progress.md` as the parity tracker
 
+## Writing a good `council solve` prompt
+
+Council answer quality is bottlenecked by the prompt's **scope** and the **context you embed** — not by the members' sandbox reach. Members run read-only, **network disabled**, cwd'd into this repo, and they routinely decline to crawl. "Give it more file access" does **not** fix an under-scoped prompt; only the author can pull the two levers below. (The system prompt now also makes members challenge the scope they were handed — but they can only reason over context you gave them.)
+
+Before launching `council solve`, check:
+
+1. **Scope to the layer where the answer lives.** Describe the subject by research *intent* and *data scale*, not by current runtime hot-paths. A question framed around hot-paths pre-decides a "no fit" verdict when the real fit is in an offline/analytics/learned-harness layer the framing never named.
+2. **Do not pre-pin a dominant variable.** If you foreground one gate (hardware, cost, scale, feasibility) as decisive, members treat everything else as a rounding error and skip investigation. Present such gates as inputs to weigh per sub-case, and ask the council to test whether the gate actually decides the outcome.
+3. **Pre-fetch and embed external facts.** Members cannot reach the network. Any URL, blog post, PyPI version, or upstream source the verdict depends on must be pasted into the prompt verbatim (use `ctx_fetch_and_index` then embed). Mark second-hand facts as unverified so members flag them.
+4. **Load intent, not just bytes.** The high-value fit usually lives in *what you are trying to build*, which a repo crawl cannot surface. State the research program, the downstream decision, and the alternative framings explicitly.
+
+A worked post-mortem of these failure modes lives in the user memory note `feedback_council_prompt_scoping_dominates`.
+
 ## Tools (v2)
 
 The MCP server exposes six tools:

@@ -9,8 +9,12 @@ import { OBJECTIVE_CONSENSUS_DIRECTIVE } from "./council/objectiveConsensusPromp
 import { resolveDeliberationsDir } from "../state/path";
 
 const OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions";
+const MOONSHOT_CHAT_COMPLETIONS_URL = "https://api.moonshot.ai/v1/chat/completions";
+const DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions";
 const DEFAULT_KIMI_MODEL = "moonshotai/kimi-k2.6";
 const DEFAULT_DEEPSEEK_MODEL = "deepseek/deepseek-v4-pro";
+const DEFAULT_DIRECT_KIMI_MODEL = "kimi-k2.6";
+const DEFAULT_DIRECT_DEEPSEEK_MODEL = "deepseek-v4-pro";
 // Gemini moved off OpenRouter to the official `@google/gemini-cli` (Google's
 // open-source CLI authenticated via `gemini auth login` against the user's
 // Google account — the same subscription path Claude/Codex use through their
@@ -29,6 +33,11 @@ const MEMBERS_ENV = "AGENTS_COUNCIL_MEMBERS";
 const DEFAULT_MEMBER_IDS = ["claude", "chatgpt"] as const;
 const OPENROUTER_TIMEOUT_ENV = "AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS";
 const OPENROUTER_URL_ENV = "AGENTS_COUNCIL_OPENROUTER_URL";
+const DIRECT_VENDOR_KEYS_ENV = "AGENTS_COUNCIL_DIRECT_VENDOR_KEYS";
+const MOONSHOT_API_KEY_ENV = "MOONSHOT_API_KEY";
+const DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY";
+const MOONSHOT_URL_ENV = "AGENTS_COUNCIL_MOONSHOT_URL";
+const DEEPSEEK_URL_ENV = "AGENTS_COUNCIL_DEEPSEEK_URL";
 const DEFAULT_OPENROUTER_TIMEOUT_MS = 300_000;
 const MIN_OPENROUTER_TIMEOUT_MS = 50;
 // Maximum deliberation rounds before the council stops looping. Overridable via
@@ -52,7 +61,7 @@ const DEFAULT_CONVERGENCE_AGREEMENT_THRESHOLD = 0.8;
 export type ModelCouncilMember = {
   id: "kimi" | "deepseek" | "gemini" | "chatgpt" | "claude";
   name: string;
-  provider: "openrouter" | "gemini" | "codex" | "claude";
+  provider: "openrouter" | "moonshot" | "deepseek" | "gemini" | "codex" | "claude";
   model: string;
 };
 
@@ -610,24 +619,34 @@ function validateCouncilConfig(members: ModelCouncilMember[]): void {
   if (members.some((member) => member.provider === "openrouter") && !readEnv("OPENROUTER_API_KEY")) {
     throw new Error("OPENROUTER_API_KEY is required for the Kimi and DeepSeek council members.");
   }
+  if (members.some((member) => member.provider === "moonshot") && !readEnv(MOONSHOT_API_KEY_ENV)) {
+    throw new Error(`${MOONSHOT_API_KEY_ENV} is required for direct Moonshot/Kimi council members.`);
+  }
+  if (members.some((member) => member.provider === "deepseek") && !readEnv(DEEPSEEK_API_KEY_ENV)) {
+    throw new Error(`${DEEPSEEK_API_KEY_ENV} is required for direct DeepSeek council members.`);
+  }
   // Gemini CLI presence is checked lazily inside askGemini — the executable
   // resolution mirrors getCodexExecutablePath() and lets the error fire with
   // install instructions only when a Gemini member actually runs.
 }
 
 export function buildDefaultMembers(): ModelCouncilMember[] {
+  const directVendorKeys = useDirectVendorKeys();
   const members: ModelCouncilMember[] = [
     {
       id: "kimi",
       name: "Kimi K2.6",
-      provider: "openrouter",
-      model: readEnv("AGENTS_COUNCIL_KIMI_MODEL") ?? DEFAULT_KIMI_MODEL,
+      provider: directVendorKeys ? "moonshot" : "openrouter",
+      model:
+        readEnv("AGENTS_COUNCIL_KIMI_MODEL") ?? (directVendorKeys ? DEFAULT_DIRECT_KIMI_MODEL : DEFAULT_KIMI_MODEL),
     },
     {
       id: "deepseek",
       name: "DeepSeek V4 Pro",
-      provider: "openrouter",
-      model: readEnv("AGENTS_COUNCIL_DEEPSEEK_MODEL") ?? DEFAULT_DEEPSEEK_MODEL,
+      provider: directVendorKeys ? "deepseek" : "openrouter",
+      model:
+        readEnv("AGENTS_COUNCIL_DEEPSEEK_MODEL") ??
+        (directVendorKeys ? DEFAULT_DIRECT_DEEPSEEK_MODEL : DEFAULT_DEEPSEEK_MODEL),
     },
     {
       id: "gemini",
@@ -681,6 +700,22 @@ async function askMember(member: ModelCouncilMember, messages: ChatMessage[]): P
   if (member.provider === "openrouter") {
     return askOpenRouter(member, messages);
   }
+  if (member.provider === "moonshot") {
+    return askDirectChatProvider(member, messages, {
+      label: "Moonshot",
+      apiKeyEnv: MOONSHOT_API_KEY_ENV,
+      urlEnv: MOONSHOT_URL_ENV,
+      defaultUrl: MOONSHOT_CHAT_COMPLETIONS_URL,
+    });
+  }
+  if (member.provider === "deepseek") {
+    return askDirectChatProvider(member, messages, {
+      label: "DeepSeek",
+      apiKeyEnv: DEEPSEEK_API_KEY_ENV,
+      urlEnv: DEEPSEEK_URL_ENV,
+      defaultUrl: DEEPSEEK_CHAT_COMPLETIONS_URL,
+    });
+  }
   if (member.provider === "gemini") {
     return askGemini(member, messages);
   }
@@ -693,6 +728,13 @@ async function askMember(member: ModelCouncilMember, messages: ChatMessage[]): P
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 const OPENROUTER_MAX_ATTEMPTS = 3;
+
+type DirectChatProviderConfig = {
+  label: string;
+  apiKeyEnv: string;
+  urlEnv: string;
+  defaultUrl: string;
+};
 
 async function askOpenRouter(member: ModelCouncilMember, messages: ChatMessage[]): Promise<string> {
   const apiKey = readEnv("OPENROUTER_API_KEY");
@@ -779,6 +821,89 @@ async function askOpenRouter(member: ModelCouncilMember, messages: ChatMessage[]
 
   // The loop always returns or throws above; this satisfies the type checker.
   throw new Error(`${member.name} OpenRouter request failed (${lastReason}).`);
+}
+
+async function askDirectChatProvider(
+  member: ModelCouncilMember,
+  messages: ChatMessage[],
+  config: DirectChatProviderConfig,
+): Promise<string> {
+  const apiKey = readEnv(config.apiKeyEnv);
+  if (!apiKey) {
+    throw new Error(`${config.apiKeyEnv} is required for ${member.name}.`);
+  }
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${apiKey}`,
+    "Content-Type": "application/json",
+  };
+  const requestBody = JSON.stringify({ model: member.model, messages });
+  const timeoutMs = resolveOpenRouterTimeoutMs();
+  const url = readEnv(config.urlEnv) ?? config.defaultUrl;
+
+  let lastReason = "no content/reasoning returned";
+  for (let attempt = 1; attempt <= OPENROUTER_MAX_ATTEMPTS; attempt++) {
+    let response: Response;
+    let rawText: string;
+    try {
+      ({ response, rawText } = await fetchTextWithTimeout(
+        url,
+        {
+          method: "POST",
+          headers,
+          body: requestBody,
+        },
+        timeoutMs,
+      ));
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      lastReason = detail;
+      if (attempt < OPENROUTER_MAX_ATTEMPTS) {
+        await delay(attempt * 500);
+        continue;
+      }
+      throw new Error(
+        `${member.name} ${config.label} request failed after ${OPENROUTER_MAX_ATTEMPTS} attempts: ${detail}`,
+      );
+    }
+
+    let body: OpenRouterResponse | null = null;
+    try {
+      body = rawText ? (JSON.parse(rawText) as OpenRouterResponse) : null;
+    } catch {
+      body = null;
+    }
+
+    if (!response.ok) {
+      const detail = body?.error?.message ?? `${response.status} ${response.statusText}`;
+      if ((response.status === 429 || response.status >= 500) && attempt < OPENROUTER_MAX_ATTEMPTS) {
+        lastReason = detail;
+        await delay(attempt * 500);
+        continue;
+      }
+      throw new Error(`${member.name} ${config.label} request failed: ${detail}`);
+    }
+
+    const choice = body?.choices?.[0];
+    const text = extractOpenRouterText(choice);
+    if (text) {
+      return text;
+    }
+
+    const finishReason = choice?.finish_reason ? `finish_reason=${choice.finish_reason}` : null;
+    const errorDetail = choice?.error?.message ?? body?.error?.message ?? null;
+    lastReason = [finishReason, errorDetail].filter(Boolean).join("; ") || "no content/reasoning returned";
+    if (attempt < OPENROUTER_MAX_ATTEMPTS) {
+      await delay(attempt * 500);
+      continue;
+    }
+    const snippet = (rawText.trim().length > 0 ? rawText : "<empty body>").slice(0, 500);
+    throw new Error(
+      `${member.name} ${config.label} returned an empty response after ${OPENROUTER_MAX_ATTEMPTS} attempts (${lastReason}). Raw: ${snippet}`,
+    );
+  }
+
+  throw new Error(`${member.name} ${config.label} request failed (${lastReason}).`);
 }
 
 // Bun 1.3.11's fetch() hangs on long-running OpenRouter responses to reasoning
@@ -972,9 +1097,17 @@ async function askCodex(member: ModelCouncilMember, messages: ChatMessage[]): Pr
 
 async function askClaude(member: ModelCouncilMember, messages: ChatMessage[]): Promise<string> {
   const claudeCodePath = await getClaudeCodeExecutablePath();
-  const prompt = messages
-    .map((message) => `${message.role.toUpperCase()}: ${flattenMessageContent(message.content)}`)
-    .join("\n\n");
+  // Council members reason and reply with text only; every tool call is denied
+  // by canUseTool below. Tell the member that UP FRONT — otherwise a file-path-
+  // rich prompt makes it attempt repo crawls, hit repeated denials, and churn
+  // the agent loop until the child process dies (observed: exit code 1 / hang
+  // on large analysis-over-a-portfolio prompts). The notice prevents the loop.
+  const toolsDisabledNotice =
+    "SYSTEM: You have no tools and no file, shell, or network access in this council deliberation. Every tool call is denied. Do not attempt to read files, list directories, search the codebase, or browse the web — reason only from the text provided. Any file paths below are context labels, not invitations to open them.";
+  const prompt = [
+    toolsDisabledNotice,
+    messages.map((message) => `${message.role.toUpperCase()}: ${flattenMessageContent(message.content)}`).join("\n\n"),
+  ].join("\n\n");
 
   const response = query({
     prompt,
@@ -1509,6 +1642,11 @@ function formatCouncilResponses(title: string, responses: ModelCouncilResponse[]
 
 function readEnv(name: string): string | null {
   return normalizeOptionalString(process.env[name]);
+}
+
+function useDirectVendorKeys(): boolean {
+  const raw = readEnv(DIRECT_VENDOR_KEYS_ENV);
+  return raw === "1" || raw?.toLowerCase() === "true" || raw?.toLowerCase() === "yes";
 }
 
 function normalizeRequiredString(value: unknown, label: string): string {

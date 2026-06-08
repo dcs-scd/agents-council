@@ -2,7 +2,12 @@ import path from "node:path";
 
 import { Command } from "commander";
 
-import { formatModelCouncilMarkdown, runModelCouncil, saveModelCouncilRun } from "../core/services/modelCouncil";
+import {
+  formatModelCouncilMarkdown,
+  runModelCouncil,
+  saveModelCouncilFailure,
+  saveModelCouncilRun,
+} from "../core/services/modelCouncil";
 import { startMcpServer } from "../interfaces/mcp/server";
 import { launchDesktopApp } from "./desktopLauncher";
 
@@ -69,6 +74,14 @@ const main = async (): Promise<void> => {
         }
         console.log(formatModelCouncilMarkdown(result));
       } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        try {
+          const saved = await saveModelCouncilFailure({ prompt: promptParts.join(" "), error: detail });
+          console.error(`Saved failure transcript to ${saved.jsonPath}`);
+        } catch (saveError) {
+          const saveDetail = saveError instanceof Error ? saveError.message : String(saveError);
+          console.error(`Warning: failed to save failure transcript: ${saveDetail}`);
+        }
         reportAndExit("Failed to run model council", error);
       }
     });

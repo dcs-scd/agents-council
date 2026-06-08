@@ -129,6 +129,30 @@ describe("model council prompt protocol", () => {
     }
   });
 
+  test("direct vendor key mode routes Kimi and DeepSeek off OpenRouter", () => {
+    const previousMembers = process.env.AGENTS_COUNCIL_MEMBERS;
+    const previousDirect = process.env.AGENTS_COUNCIL_DIRECT_VENDOR_KEYS;
+    const previousKimiModel = process.env.AGENTS_COUNCIL_KIMI_MODEL;
+    const previousDeepSeekModel = process.env.AGENTS_COUNCIL_DEEPSEEK_MODEL;
+    process.env.AGENTS_COUNCIL_MEMBERS = "kimi,deepseek";
+    process.env.AGENTS_COUNCIL_DIRECT_VENDOR_KEYS = "1";
+    delete process.env.AGENTS_COUNCIL_KIMI_MODEL;
+    delete process.env.AGENTS_COUNCIL_DEEPSEEK_MODEL;
+
+    try {
+      const selected = buildDefaultMembers();
+      expect(selected.map((member) => [member.id, member.provider, member.model])).toEqual([
+        ["kimi", "moonshot", "kimi-k2.6"],
+        ["deepseek", "deepseek", "deepseek-v4-pro"],
+      ]);
+    } finally {
+      restoreEnv("AGENTS_COUNCIL_MEMBERS", previousMembers);
+      restoreEnv("AGENTS_COUNCIL_DIRECT_VENDOR_KEYS", previousDirect);
+      restoreEnv("AGENTS_COUNCIL_KIMI_MODEL", previousKimiModel);
+      restoreEnv("AGENTS_COUNCIL_DEEPSEEK_MODEL", previousDeepSeekModel);
+    }
+  });
+
   test("OpenRouter requests time out instead of hanging indefinitely", async () => {
     const server = Bun.serve({
       port: 0,

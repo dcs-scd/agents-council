@@ -1,0 +1,38 @@
+{
+  "status": "completed",
+  "outcome": "blocked",
+  "reached": false,
+  "rounds": 2,
+  "repairAttempted": true,
+  "members": [
+    {
+      "id": "claude",
+      "name": "Opus 4.8",
+      "provider": "claude",
+      "model": "claude-opus-4-8"
+    },
+    {
+      "id": "chatgpt",
+      "name": "ChatGPT 5.5",
+      "provider": "codex",
+      "model": "gpt-5.5"
+    },
+    {
+      "id": "kimi",
+      "name": "Kimi K2.6",
+      "provider": "moonshot",
+      "model": "kimi-k2.6"
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek V4 Pro",
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro"
+    }
+  ],
+  "blockedBy": ["ChatGPT 5.5"],
+  "promptPath": "/home/dstefanescu/other_systems/o4/agents-council/council_runs/consensus_approach_council4_prompt_2026-06-08T11-37-14Z.md",
+  "jsonPath": "/home/dstefanescu/other_systems/o4/agents-council/council_runs/council-2026-06-08T11-59-02-883Z.json",
+  "markdownPath": "/home/dstefanescu/other_systems/o4/agents-council/council_runs/council-2026-06-08T11-59-02-883Z.md",
+  "completedAt": "2026-06-08T11:59:02.910Z"
+}

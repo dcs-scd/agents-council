@@ -11,7 +11,12 @@ import {
   resolveDefaultSummonAgent,
   summonAgent,
 } from "../../core/services/council/summon";
-import { runModelCouncil, saveModelCouncilRun, type ModelCouncilResult } from "../../core/services/modelCouncil";
+import {
+  runModelCouncil,
+  saveModelCouncilFailure,
+  saveModelCouncilRun,
+  type ModelCouncilResult,
+} from "../../core/services/modelCouncil";
 import { FileCouncilStateStore } from "../../core/state/fileStateStore";
 import {
   mapCloseSessionInput,
@@ -58,7 +63,7 @@ const serverInstructions = [
   "If you are requested to join the council, call join_council with session_id, read the request, and send_response with the same session_id as soon as possible.",
   "Use get_current_session_data with session_id to poll for new responses; pass the cursor returned to fetch only newer messages.",
   "Use close_council with session_id to end that session with a conclusion.",
-  "Use run_model_council when the user wants Kimi 2.6, DeepSeek V4 Pro, Gemini 3.5 Flash, ChatGPT 5.5, and Opus 4.7 to deliberate and reach peer-ratified consensus without a chair.",
+  "Use run_model_council when the user wants Opus 4.8 and GPT-5.5 (xhigh reasoning) to deliberate and reach peer-ratified consensus without a chair. Set AGENTS_COUNCIL_MEMBERS to widen the roster (e.g. add Kimi, DeepSeek, Gemini).",
 ].join("\n");
 
 const server = new McpServer(
@@ -399,7 +404,7 @@ function registerTools(options: {
     "run_model_council",
     {
       description:
-        "Run the configured autonomous multi-agent council: Kimi 2.6, DeepSeek V4 Pro, and Gemini 3.5 Flash through OpenRouter, ChatGPT 5.5 through local OpenAI subscription auth, and Opus 4.7 through local Anthropic (Claude Code) subscription auth. The agents propose, deliberate, and independently ratify or block consensus without a chair.",
+        "Run the configured autonomous two-member council by default: Opus 4.8 through local Anthropic (Claude Code) subscription auth and GPT-5.5 at xhigh reasoning through local OpenAI (Codex) subscription auth. The members propose, deliberate over rounds until the candidate consensus stabilizes, then independently ratify or block it without a chair. Set AGENTS_COUNCIL_MEMBERS to widen the roster (kimi/deepseek/gemini via OpenRouter, plus chatgpt/claude).",
       inputSchema: runModelCouncilSchema,
     },
     async (params) => {
@@ -413,6 +418,13 @@ function registerTools(options: {
         }
         return toolOk("run_model_council", result);
       } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        try {
+          await saveModelCouncilFailure({ prompt: params.prompt, error: detail });
+        } catch (saveError) {
+          const saveDetail = saveError instanceof Error ? saveError.message : String(saveError);
+          console.error(`Warning: failed to save failure transcript: ${saveDetail}`);
+        }
         return toolError(error);
       }
     },
