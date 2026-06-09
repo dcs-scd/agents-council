@@ -32,6 +32,28 @@
 <p class="sub">A running log of decisions not in the original ask, changes, tradeoffs, and things to know.
 Maintained across the build-out of the multi-model autonomous council. Newest section first.</p>
 
+<h2>Session 2026-06-09 — WU-B4 executed (minority report + CLI blocked exit code)</h2>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span> CLI signals a blocked run via <code>process.exitCode = 1</code>, not <code>process.exit(1)</code></h3>
+  <div class="meta">2026-06-09 · <code>src/cli/index.ts</code> (<code>solve</code> action)</div>
+  <p>The brief requires the council CLI to exit non-zero on a <code>blocked</code> outcome. I set <code>process.exitCode = 1</code> after printing rather than calling <code>process.exit(1)</code>. The <code>solve</code> path has already issued <code>saveModelCouncilRun</code> (deliberation JSON + Markdown) and writes to stdout; <code>process.exit</code> can truncate an unflushed stdout buffer and abort in-flight writes. Setting the exit code lets <code>parseAsync</code> resolve and the process drain naturally, then exit 1.</p>
+  <p class="why"><b>Why:</b> correct failure signal to the caller without risking a truncated transcript or lost stdout — the exit code is the only off-spec-shaped detail, and this is the safe form of it.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span> Minority report is an additional field on the consensus result, emitted only on <code>blocked</code>; top-level enum frozen (INV-6)</h3>
+  <div class="meta">2026-06-09 · <code>modelCouncil.ts</code> / <code>modelCouncil.minorityReport.test.ts</code></div>
+  <p>Added <code>MinorityReportEntry</code> and an optional <code>minorityReport?: MinorityReportEntry[]</code> on <code>ModelCouncilConsensus</code>. <code>buildConsensusResult</code> populates it from the non-accepted ratifications <b>only on the <code>blocked</code> branch</b> (ratified / not_attempted leave it <code>undefined</code>); <code>formatModelCouncilMarkdown</code> renders a <code>## Minority Report</code> section under the same condition. Each entry carries <code>{member, blockKind?, absolute, dissent}</code>. Because the WU-B2 claim-ledger preconditions raise a synthetic absolute <code>FACTUAL_ERROR</code> block — itself a blocking ratification — those preconditions automatically surface as dissent here; no special-casing needed.</p>
+  <p class="why"><b>Why:</b> the unit is purely additive. <code>ModelCouncilConsensusOutcome</code> stays exactly <code>"ratified" | "blocked" | "not_attempted"</code> (INV-6) and no <code>qualified_consensus</code> was introduced — the report is a field, not a new outcome state.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">FYI</span> The new test spawns the real CLI binary for the exit-code proof</h3>
+  <div class="meta">2026-06-09 · <code>modelCouncil.minorityReport.test.ts</code></div>
+  <p>The CLI exit-code evidence runs <code>Bun.spawn(["bun", src/cli/index.ts, "solve", …])</code> against a mock OpenRouter server, so the assertion exercises the actual <code>src/cli/index.ts</code> exit path rather than a reimplementation. Two cases (each with a 30s test timeout): a canned <code>BLOCK/FACTUAL_ERROR</code> ratify exits non-zero; a canned <code>ACCEPT</code> ratify exits 0. The JSON+Markdown dissent assertions use the in-process <code>buildConsensusResult</code> / <code>formatModelCouncilMarkdown</code> harness pattern from <code>modelCouncil.test.ts</code>. Full service suite went 78 → 85 (the 7 new tests); <code>modelCouncil.test.ts</code> stayed 53/53 (INV-8).</p>
+</div>
+
 <h2>Session 2026-06-09 — WU-B2 executed (recovered after an infra crash)</h2>
 
 <div class="entry">

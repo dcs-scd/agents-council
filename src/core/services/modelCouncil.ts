@@ -148,6 +148,24 @@ export type ModelCouncilRatification = ModelCouncilResponse & {
 // failed. With this field the two cases are distinguishable.
 export type ModelCouncilConsensusOutcome = "ratified" | "blocked" | "not_attempted";
 
+// A single recorded dissent in the minority report (WU-B4). Each entry is the
+// stated objection of one member who withheld acceptance — including a member
+// whose block carries an absolute veto (FACTUAL_ERROR / MATERIAL_DISAGREEMENT),
+// which is how the WU-B2 claim-ledger preconditions surface: those preconditions
+// raise a synthetic FACTUAL_ERROR ratification, so they appear here as dissent.
+// The minority report is an additional field on the result, NOT a new outcome
+// state — the top-level enum stays frozen at not_attempted|ratified|blocked (INV-6).
+export type MinorityReportEntry = {
+  member: string;
+  // The block kind, when the member's vote carried one (a bare BLOCK has none).
+  blockKind?: RatificationBlockKind;
+  // True when the block is an absolute veto (F7) — a hard stop, not a repairable
+  // objection. Lets a consumer separate vetoes from path-to-accept dissents.
+  absolute: boolean;
+  // The member's raw dissent text, preserved verbatim for the audit trail.
+  dissent: string;
+};
+
 export type ModelCouncilConsensus = {
   reached: boolean;
   outcome: ModelCouncilConsensusOutcome;
@@ -155,6 +173,10 @@ export type ModelCouncilConsensus = {
   blockedBy: string[];
   // Optional human-facing reason for non-ratification. Machines key off `outcome`.
   notRatifiedReason?: string;
+  // Present only on a `blocked` outcome (WU-B4): the first-class record of every
+  // dissent that prevented ratification, so a blocked run never silently drops the
+  // minority's objections. Absent on ratified/not_attempted.
+  minorityReport?: MinorityReportEntry[];
 };
 
 // Record of a consensus-repair cycle. The council reasons in prose, so members
@@ -572,6 +594,18 @@ export function formatModelCouncilMarkdown(result: ModelCouncilResult): string {
       lines.push("", `#### ${ratification.member.name} — ${verdict}`, "", ratification.content);
     }
     lines.push("", "### Revised candidate", "", result.repair.revisedCandidate);
+  }
+
+  // Minority report (WU-B4): a first-class, consolidated record of the blocking
+  // dissents, rendered only on a `blocked` outcome so the minority's objections —
+  // including a WU-B2 claim-ledger FACTUAL_ERROR precondition — are never dropped.
+  const minorityReport = result.consensus.minorityReport;
+  if (result.consensus.outcome === "blocked" && minorityReport && minorityReport.length > 0) {
+    lines.push("", "## Minority Report");
+    for (const entry of minorityReport) {
+      const kind = entry.blockKind ? `${entry.blockKind}${entry.absolute ? " (absolute veto)" : ""}` : "BLOCK";
+      lines.push("", `### ${entry.member} — ${kind}`, "", entry.dissent);
+    }
   }
 
   lines.push("", result.repair ? "## Peer Ratifications (after repair)" : "## Peer Ratifications");
@@ -1894,12 +1928,26 @@ export function buildConsensusResult(
   // Blocked. If the block is an absolute veto (F7), say so in the reason so the
   // outcome is self-explaining — a hard stop, not a repairable "ACCEPT after edits".
   const veto = ratifications.find(isAbsoluteVeto);
+  // Minority report (WU-B4): every dissenting ratification becomes a first-class
+  // record, so the blocking objections — including a WU-B2 claim-ledger
+  // FACTUAL_ERROR precondition, which is itself a blocking ratification — are never
+  // silently dropped on a `blocked` outcome. Keyed off `blocked` only; the top-level
+  // enum is unchanged (INV-6).
+  const minorityReport: MinorityReportEntry[] = ratifications
+    .filter((ratification) => !ratification.accepted)
+    .map((ratification) => ({
+      member: ratification.member.name,
+      ...(ratification.vote.blockKind ? { blockKind: ratification.vote.blockKind } : {}),
+      absolute: isAbsoluteVeto(ratification),
+      dissent: ratification.content,
+    }));
   return {
     reached: false,
     outcome: "blocked",
     ratifiedBy,
     blockedBy,
     ...(veto ? { notRatifiedReason: `unrepairable veto: ${veto.vote.blockKind} (raised by ${veto.member.name})` } : {}),
+    minorityReport,
   };
 }
 

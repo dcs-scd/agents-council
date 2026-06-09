@@ -70,9 +70,15 @@ const main = async (): Promise<void> => {
         }
         if (options.json) {
           console.log(JSON.stringify(result, null, 2));
-          return;
+        } else {
+          console.log(formatModelCouncilMarkdown(result));
         }
-        console.log(formatModelCouncilMarkdown(result));
+        // A blocked council is a hard stop (an absolute veto or an unresolved
+        // claim-ledger precondition), so the run must signal failure to its caller
+        // (WU-B4). Ratified / not_attempted are non-error completions (exit 0).
+        if (result.consensus.outcome === "blocked") {
+          process.exitCode = 1;
+        }
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         try {
