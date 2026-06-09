@@ -366,6 +366,154 @@ Enable summon debug logging (writes `summon-debug.log` in the current working di
 AGENTS_COUNCIL_SUMMON_DEBUG=1
 ```
 
+## Structured deliberation subsystem (Claim-Ledger Delphi)
+
+The model council ships an optional **structured deliberation path** layered onto the
+existing text-based council in `src/core/services/modelCouncil.ts`. It adds typed claims,
+provenance checks, dissent and trace artifacts, and an observational issue map — without
+changing the live convergence controller. Everything below is **additive and opt-in**; with
+the flag off the council behaves exactly as it did before.
+
+### Opt-in flag — `AGENTS_COUNCIL_STRUCTURED`
+
+- **Default: OFF.** When `AGENTS_COUNCIL_STRUCTURED` is unset (or not truthy), the council
+  runs the legacy text-parse path. The flag-off path is **byte-for-byte legacy**: it never
+  imports the Zod schema module, writes no new artifacts, and produces the same prompts,
+  parses, and outputs as before. This is a single implementation — there is no parallel
+  `delphiCouncil.ts` fork; the structured logic is flag-gated branches inside
+  `runModelCouncil` / `saveModelCouncilRun`.
+- **Set the flag to enable** the typed schemas, the provenance/source-ID preconditions, the
+  trace file, and the issue-map file.
+
+### Typed claim schema and text fallback
+
+Under the flag, member proposals and ratifications are validated against Zod schemas defined
+in `src/core/services/council/schemas.ts`:
+
+- `Claim { id, text, provenance, evidence: string[], severity? }`, plus `IndependentProposal`,
+  `DeliberationResponse`, and `RatificationVote`.
+- `provenance` is a **frozen enum**: `repo_fact | source_claim | assumption`.
+- JSON mode is requested where the provider supports it. **On a Zod parse failure the council
+  falls back to the existing text parsers** and increments a per-run parse-fail counter
+  (surfaced via `getParseFailStats()`), so an unparseable structured payload degrades to legacy
+  behavior rather than failing the run.
+
+Zod is bundled into the compiled `dist/council` binary even though it is a `devDependency`
+(verified by parsing from the compiled binary with `node_modules/zod` removed).
+
+### Provenance / Level-1 source-ID block precondition
+
+When structured, before ratification the council runs **pure, deterministic** claim-ledger
+preconditions (no LLM, no sandbox, no network). A tripped check raises a single absolute
+`FACTUAL_ERROR` block via the existing veto machinery — it does **not** introduce a new veto
+kind and does **not** weaken any veto's absoluteness. The checks:
+
+1. **`SOURCE_ID_MISMATCH` (Level-1 source-ID, the real Wave-B deliverable):** a `repo_fact`
+   claim whose cited evidence-pack id is **absent from (or empty against) the supplied evidence
+   pack** is blocked. This is the deterministic source-ID precondition described in Addendum
+   A.3.3.
+2. **`UNLABELED_CLAIM`:** a factual claim with no provenance label.
+3. **`ASSUMPTION_NO_VERIFICATION`:** an `assumption` with no stated cheapest verification.
+
+Blocks enter only the `ratifications` array; they are **never** fed to the convergence
+controller (`isConverged`).
+
+**Wave-B heuristic boundaries (FYI — to revisit at the Wave-C entry gate):**
+
+- `UNLABELED_CLAIM` is effectively unreachable through the live applier, because `ClaimSchema`
+  requires `provenance`; a literally unlabeled claim makes the structured parse fail and falls
+  back to legacy. The check fires only when the pure function is invoked with loosely-typed
+  claims. End-to-end "unverifiable repo claim" coverage is therefore carried by the
+  `SOURCE_ID_MISMATCH` check (a `repo_fact` with absent/empty evidence).
+- `ASSUMPTION_NO_VERIFICATION` currently fires for **every** `assumption`, because `ClaimSchema`
+  carries no `cheapest_verification` field for an assumption to populate. Net behavior is
+  conservative (all assumptions block). Closing this B1↔B2 contract gap means adding a field to
+  the frozen schema and is deferred.
+
+### Evidence-pack input
+
+`runModelCouncil` accepts an optional `evidencePack: { id, text, source }[]` argument. When
+supplied, the pack is **prepended to the round-0 proposal system messages** so members can cite
+entries by `[id]`; the `SOURCE_ID_MISMATCH` check above validates `repo_fact` citations against
+these ids. This is **plumbing only** — evidence-pack generation is out of scope. When no pack is
+supplied the proposal prompts are **byte-identical to legacy**.
+
+### Odd-roster default
+
+The flag-off default roster is now an **odd, heterogeneous** panel:
+`DEFAULT_MEMBER_IDS = ["claude", "chatgpt", "gemini"]` (n=3, three distinct providers —
+Anthropic / OpenAI-codex / Google — all locally-credentialed CLI providers, so a default run
+needs no OpenRouter or vendor API key and config validation never throws). This is a
+**config-only** change with no protocol, router, or convergence-code change.
+
+The explicit `AGENTS_COUNCIL_MEMBERS` override is unchanged: it is a comma-separated list of
+member ids that resolves to **exactly** those members. A two-id override (e.g.
+`AGENTS_COUNCIL_MEMBERS="claude,chatgpt"`) yields the cheap **n=2 draft** roster; the odd≥3
+default applies only when the override is unset.
+
+### Minority-report artifact
+
+The consensus result carries an optional `minorityReport[]` of `MinorityReportEntry`
+(`{ member, blockKind, absolute, dissent }`), populated from the non-accepted ratifications
+**only on a `blocked` outcome** (including a claim-ledger `FACTUAL_ERROR` precondition block,
+which is itself a blocking ratification). `formatModelCouncilMarkdown` renders a
+`## Minority Report` section on `blocked` only; `ratified` and `not_attempted` carry no report
+and render no section. The `council solve` CLI sets a **non-zero exit code** on a `blocked`
+outcome (exit 0 on `ratified` / `not_attempted`).
+
+### Structured trace artifact
+
+Under the flag, `saveModelCouncilRun` writes a `trace-{ts}.json` file
+(`agents-council.council_trace.v1`) alongside the existing `council-{ts}.json/.md`. Its
+top-level shape mirrors the external consumer contract in
+`~/.claude/halo_x_tools/council_to_brief.py` (`prompt`, `members{id,name,provider,model}`,
+`consensus{reached,ratifiedBy,blockedBy}`, `converged`, `rounds{index,changed,memberAgreement}`,
+`candidateConsensus`), plus an additive per-claim / per-member / per-round `claims[]`. **Member
+weights are equal** — every member carries `weight === 1`; the trace never weights by prestige.
+A real generated trace parses cleanly through `council_to_brief.py` in both `--format json` and
+`--format brief`.
+
+### Observational issue map (controls nothing)
+
+Under the flag, `saveModelCouncilRun` also writes an `issue-map-{ts}.json` file
+(`agents-council.issue_map.v1`), built by `src/core/services/council/issueMap.ts`. It is a
+**deterministic, normalized exact-match** clustering of the schema-validated claims into an
+**agreed** (asserted by >1 distinct member) / **contested** (lone member) partition — no
+embeddings, no LLM mediator. The issue map is an **instrument**, not a controller: it is
+computed after the result exists, is **never** read by `isConverged` or ratification, and
+changes nothing about the council's outcome (controller-isolation proven structurally and by
+value). The only live convergence controller remains the F3 self-reported `CONSENSUS_STATUS`
+(with draft-overlap fallback).
+
+### Top-level outcome enum is frozen
+
+The top-level consensus outcome enum stays **frozen** at
+`not_attempted | ratified | blocked`. The minority report is an **additional field**, not a new
+outcome. `qualified_consensus` is **deferred and nested-only** — it is not added to the
+top-level enum.
+
+### New environment variables
+
+| Variable | Effect |
+|---|---|
+| `AGENTS_COUNCIL_STRUCTURED` | Opt-in (default OFF) for the entire structured path above: typed schemas, provenance/source-ID preconditions, `trace-{ts}.json`, and `issue-map-{ts}.json`. Flag-off is byte-for-byte legacy. |
+| `AGENTS_COUNCIL_MEMBERS` | Comma-separated member-id list that overrides the odd≥3 default roster, resolving to exactly those members (e.g. a two-id list yields the cheap n=2 draft). |
+
+### Graduation gate (Wave C)
+
+The structured path is currently **advisory** — it adds artifacts and preconditions but does
+not control convergence. It graduates from advisory to **controlling** (issue-map-as-controller,
+claim-ledger convergence, a Level-2 source-check verifier) only after clearing the Wave-C entry
+gate, which requires **both**:
+
+1. a structured-output **parse-fail rate < 5% over ≥ 50 sample runs**, and
+2. the structured council **beats self-consistency** on the benchmark distribution.
+
+On failure, the issue map is downgraded to audit-only, the F3 self-report and the provenance
+label gate are kept, and graduation stops. Wave C is recorded as deferred work in
+`docs/implementation/council-claim-ledger-delphi/work-units.md` and is **not** part of the
+shipped Wave A+B build.
+
 ## SDK Requirement
 
 The MCP adapter uses the TypeScript SDK v1.x (`@modelcontextprotocol/sdk`).

@@ -32,6 +32,29 @@
 <p class="sub">A running log of decisions not in the original ask, changes, tradeoffs, and things to know.
 Maintained across the build-out of the multi-model autonomous council. Newest section first.</p>
 
+<h2>Session 2026-06-09 — WU-B8 executed (docs/council.md — structured subsystem documentation)</h2>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span> Documented the structured subsystem as one new top-level section in <code>docs/council.md</code>, grounded in the WU-* execution reports</h3>
+  <div class="meta">2026-06-09 · <code>docs/council.md</code> · WU-B8 (docs-only, all 8 code units already landed)</div>
+  <p>Added a single <em>"Structured deliberation subsystem (Claim-Ledger Delphi)"</em> section before <code>## SDK Requirement</code>, matching the doc's existing prose + fenced-block + table style. Every statement is grounded in the shipped behavior per the <code>_reports/WU-*-execution.md</code> files: the <code>AGENTS_COUNCIL_STRUCTURED</code> opt-in (default OFF, flag-off byte-for-byte legacy), the typed Claim schema + Zod-fallback (B1), the pure Level-1 <code>SOURCE_ID_MISMATCH</code> / <code>UNLABELED_CLAIM</code> / <code>ASSUMPTION_NO_VERIFICATION</code> preconditions raising an absolute <code>FACTUAL_ERROR</code> block (B2), the evidence-pack round-0 plumbing (B3), the <code>minorityReport[]</code> + CLI non-zero exit (B4), the <code>trace-{ts}.json</code> consumer contract with equal member weights (B5), the non-controlling <code>issue-map-{ts}.json</code> partition (B6), the odd-roster default + <code>AGENTS_COUNCIL_MEMBERS</code> override (B7), the INV-6 enum freeze, an env-var table, and a Wave-C entry-gate cross-link.</p>
+  <p class="why"><b>Why:</b> the brief's only invariant is faithfulness to what was built; reading the per-unit reports first (not the spec) ensured the doc describes shipped behavior, including the two known Wave-B contract gaps.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span> Documented the two WU-B2 heuristic boundaries verbatim, not the idealized spec</h3>
+  <div class="meta">2026-06-09 · provenance preconditions</div>
+  <p>The doc states plainly that <code>UNLABELED_CLAIM</code> is effectively unreachable through the live applier (the frozen <code>ClaimSchema</code> requires <code>provenance</code>, so a literally unlabeled claim fails the structured parse and falls back to legacy), and that <code>ASSUMPTION_NO_VERIFICATION</code> currently fires for <em>every</em> assumption (the schema carries no <code>cheapest_verification</code> field). Both are conservative, both are flagged as the B1↔B2 contract gap to revisit at the Wave-C entry gate.</p>
+  <p class="why"><b>Why:</b> a doc that claimed three independently-firing checks would be a false statement of behavior; the Level-1 source-ID check is the real Wave-B deliverable and the doc says so.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span> No MDOC stub created; <code>gate_mdoc_clean</code> is a plain-doc gate here</h3>
+  <div class="meta">2026-06-09 · <code>gate_mdoc_clean → done</code></div>
+  <p>agents-council is a nested repo with no MDOC registry, so I did not create <code>.claude/state/mdocs.json</code> or any scope-signature artifact — <code>gate_mdoc_clean</code> is satisfied by the plain Markdown update alone. <code>format:check</code> is unchanged from HEAD (81 files, the same three pre-existing/unrelated reds: <code>harness/run_tier5_scheduling_council.ts</code>, <code>harness/model_council_result_r5.json</code>, <code>council_runs/*.json</code>); <code>docs/council.md</code> is Markdown and is not in biome's formatter set, so the docs change adds no new red. No source or test file was touched. <code>gate_regression</code> stays <code>planned</code> for acceptance to evaluate. All 9 units are now done.</p>
+  <p class="why"><b>Why:</b> the write-boundary and the project's lack of an MDOC system require the docs gate be closed by the doc itself, not by an invented registry stub.</p>
+</div>
+
 <h2>Session 2026-06-09 — WU-B5 + WU-B6 executed (structured trace + observational issue map)</h2>
 
 <div class="entry">
