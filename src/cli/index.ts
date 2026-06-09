@@ -3,6 +3,7 @@ import path from "node:path";
 import { Command } from "commander";
 
 import {
+  councilOutcomeExitCode,
   formatModelCouncilMarkdown,
   runModelCouncil,
   saveModelCouncilFailure,
@@ -76,9 +77,8 @@ const main = async (): Promise<void> => {
         // A blocked council is a hard stop (an absolute veto or an unresolved
         // claim-ledger precondition), so the run must signal failure to its caller
         // (WU-B4). Ratified / not_attempted are non-error completions (exit 0).
-        if (result.consensus.outcome === "blocked") {
-          process.exitCode = 1;
-        }
+        // The outcome -> exit-code map is the unit-tested councilOutcomeExitCode.
+        process.exitCode = councilOutcomeExitCode(result.consensus.outcome);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         try {

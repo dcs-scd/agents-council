@@ -32,6 +32,39 @@
 <p class="sub">A running log of decisions not in the original ask, changes, tradeoffs, and things to know.
 Maintained across the build-out of the multi-model autonomous council. Newest section first.</p>
 
+<h2>Session 2026-06-09 — Post-review hardening (Hydra review since <code>fbfc9e8</code>)</h2>
+
+<p class="sub">Source: Hydra review run <code>hydra_20260609T0216_269058_ff9aff</code> (focus correctness+security; 0 critical/high, 5 medium, 9 low). User chose "Path B": apply the genuine code edits directly, hand back the test-debt as a separate list. Edits landed: L1/L2 in <code>fetchTextWithTimeout</code> (<code>modelCouncil.ts</code>), then M5 (a testable exit-code seam + test across <code>modelCouncil.ts</code> + <code>cli/index.ts</code>). M2 declined.</p>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span> Extracted <code>councilOutcomeExitCode()</code> to make the veto&rarr;exit-1 invariant unit-testable (review M5)</h3>
+  <div class="meta">2026-06-09 · <code>src/core/services/modelCouncil.ts</code> + <code>src/cli/index.ts</code> + new <code>modelCouncil.exitCode.test.ts</code></div>
+  <p>M5 ("blocked&rarr;exit 1 has zero coverage; a flip passes CI silently") was <em>not unit-testable as written</em>: <code>main()</code> auto-runs on import (<code>cli/index.ts:129</code>) and the exit decision was an inline one-liner inside the <code>solve</code> commander closure that drives the live <code>runModelCouncil</code> (real LLM subprocesses). Rather than a flaky subprocess/module-mock harness, I extracted the <code>outcome &rarr; exit code</code> map into a pure exported helper <code>councilOutcomeExitCode(outcome)</code> next to <code>ModelCouncilConsensusOutcome</code>, had <code>solve</code> set <code>process.exitCode</code> from it, and pinned it with 4 deterministic assertions (blocked&rarr;1, ratified&rarr;0, not_attempted&rarr;0, all map to 0|1).</p>
+  <p class="why"><b>Why a seam instead of a pure test:</b> the only deterministic way to guard the invariant without spawning the CLI or hitting providers. The CLI change is behavior-preserving — <code>blocked&rarr;1, else 0</code> is identical to the prior <code>if (blocked) exitCode = 1</code> (explicit <code>=0</code> on success equals the default). Verified: <code>tsc</code> clean, biome clean, 60/60 tests pass (56 prior + 4 new), no regression on bearer/core. Single shared helper, no new file beyond the test — consistent with the project's "add one shared helper only when reused" rule (reused by CLI + test).</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span> Bearer-token curl config file now cleaned up under <code>try/finally</code> (review L1)</h3>
+  <div class="meta">2026-06-09 · <code>src/core/services/modelCouncil.ts</code> · <code>fetchTextWithTimeout</code></div>
+  <p>Previously the <code>rm(configPath)</code> cleanup ran only on the linear path after <code>Promise.all</code>. A throw between <code>writeFile</code> and that cleanup (<code>Bun.spawn</code> failure, <code>sink.write</code>, or a <code>Promise.all</code> rejection) left the 0600 token config file on disk. Wrapped the spawn + IO in <code>try/finally</code> with the best-effort <code>rm</code> in the <code>finally</code>; the destructured <code>Promise.all</code> result is now read out of a <code>settled</code> tuple into pre-declared <code>let</code>s so the cleanup can own the surrounding block.</p>
+  <p class="why"><b>Why:</b> guarantee the bearer-token temp file is removed on every exit path. Pure failure-path/cleanup change — the success path and the function's signature/return are unchanged. Verified: <code>tsc --noEmit</code> clean, 56/56 bearer+core tests pass.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span> Token config file written with <code>O_EXCL</code> (<code>flag: "wx"</code>) to close the tmpdir TOCTOU window (review L2)</h3>
+  <div class="meta">2026-06-09 · <code>src/core/services/modelCouncil.ts</code> · <code>fetchTextWithTimeout</code></div>
+  <p>The config path is a predictable name in the shared <code>tmpdir()</code>. Added <code>flag: "wx"</code> (<code>O_CREAT|O_EXCL</code>) to the <code>writeFile</code> so it fails closed if the path already exists or is a symlink, rather than following a pre-planted symlink / truncating an attacker file before the token is written.</p>
+  <p class="why"><b>Why:</b> minimal fix for the reviewer's exact concern ("mkdtemp/O_EXCL would close the symlink/TOCTOU window"). Chose <code>O_EXCL</code> over <code>mkdtemp</code> to avoid a new import and recursive-dir cleanup — one option flag, fails closed, no new moving parts in security/subprocess code.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span> M2 (<code>candidateConsensus</code> <code>.min(1)</code>) <em>deliberately NOT applied</em> — pending owner decision</h3>
+  <div class="meta">2026-06-09 · <code>src/core/services/council/schemas.ts</code> · <code>DeliberationResponseSchema</code> / <code>IndependentProposalSchema</code></div>
+  <p>The review proposed adding <code>.min(1)</code> to <code>candidateConsensus</code>. Reading the consumer changed the call: <code>parseStructuredOrFallback</code> routes <em>any</em> validation failure to the legacy text parser <strong>and</strong> records it via <code>recordParseAttempt(false)</code>, which feeds the gated <code>parse-fail rate &lt; 5%</code> Wave-C entry metric. So <code>.min(1)</code> is not a no-op: an empty structured consensus would (a) change consensus routing (structured → legacy salvage) and (b) count against a gated telemetry budget. The cross-review already showed the <em>live</em> risk is neutralized by the consumer's <code>candidateConsensus.trim().length &gt; 0</code> guard at <code>modelCouncil.ts:377</code> (empty → <code>not_attempted</code>, honestly labeled).</p>
+  <p class="why"><b>Why deferred:</b> project hard rule 2 — do not change anything affecting evaluation comparability without asking. This touches a gate metric. Surfaced as a yes/no to the user instead of applying mechanically.</p>
+  <p class="why"><b>Resolved 2026-06-09:</b> owner chose <em>leave as-is</em> — accepted by design. The <code>candidateConsensus.trim()</code> guard is the contract; the schema stays <code>z.string()</code> so a degenerate empty consensus does not consume the gated parse-fail budget. No code change.</p>
+</div>
+
 <h2>Session 2026-06-09 — WU-B8 executed (docs/council.md — structured subsystem documentation)</h2>
 
 <div class="entry">

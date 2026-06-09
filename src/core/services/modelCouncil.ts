@@ -148,6 +148,16 @@ export type ModelCouncilRatification = ModelCouncilResponse & {
 // failed. With this field the two cases are distinguishable.
 export type ModelCouncilConsensusOutcome = "ratified" | "blocked" | "not_attempted";
 
+// The process exit-code contract for a finished council run (WU-B4). A `blocked`
+// outcome is a hard stop — an absolute veto or an unresolved claim-ledger
+// precondition — so the caller must see a non-zero exit; `ratified` and
+// `not_attempted` are non-error completions. Extracted as a pure function so the
+// veto -> non-zero-exit invariant is unit-testable without spawning the CLI (the
+// `solve` action sets `process.exitCode` from this).
+export function councilOutcomeExitCode(outcome: ModelCouncilConsensusOutcome): number {
+  return outcome === "blocked" ? 1 : 0;
+}
+
 // A single recorded dissent in the minority report (WU-B4). Each entry is the
 // stated objection of one member who withheld acceptance — including a member
 // whose block carries an absolute veto (FACTUAL_ERROR / MATERIAL_DISAGREEMENT),
@@ -1114,7 +1124,10 @@ export async function fetchTextWithTimeout(
       tmpdir(),
       `agents-council-curl-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.cfg`,
     );
-    await writeFile(configPath, `${configLines.join("\n")}\n`, { mode: 0o600 });
+    // flag "wx" = O_CREAT|O_EXCL: fail closed if the path already exists or is a
+    // symlink, closing the predictable-name TOCTOU / symlink-swap window in the
+    // shared tmpdir before the bearer token is written.
+    await writeFile(configPath, `${configLines.join("\n")}\n`, { mode: 0o600, flag: "wx" });
   }
 
   const method = (init.method ?? "GET").toUpperCase();
@@ -1134,28 +1147,39 @@ export async function fetchTextWithTimeout(
     url,
   ];
 
-  const proc = Bun.spawn(["curl", ...args], {
-    stdin: body !== null ? "pipe" : "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  // The bearer token sits on disk in `configPath` from here until cleanup. Run
+  // the spawn + IO under try/finally so a throw (spawn failure, sink write,
+  // Promise.all rejection) can never leave the token config file behind.
+  let stdoutText: string;
+  let stderrText: string;
+  let exitCode: number;
+  try {
+    const proc = Bun.spawn(["curl", ...args], {
+      stdin: body !== null ? "pipe" : "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
 
-  if (body !== null && proc.stdin) {
-    // proc.stdin is a Bun FileSink (write+end), not a WHATWG WritableStream.
-    const sink = proc.stdin;
-    sink.write(body);
-    sink.end();
-  }
+    if (body !== null && proc.stdin) {
+      // proc.stdin is a Bun FileSink (write+end), not a WHATWG WritableStream.
+      const sink = proc.stdin;
+      sink.write(body);
+      sink.end();
+    }
 
-  const [stdoutText, stderrText, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-
-  if (configPath !== null) {
-    // Best-effort cleanup; curl has already consumed the config by exit.
-    await rm(configPath, { force: true }).catch(() => {});
+    const settled = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    stdoutText = settled[0];
+    stderrText = settled[1];
+    exitCode = settled[2];
+  } finally {
+    if (configPath !== null) {
+      // Best-effort cleanup; curl has already consumed the config by exit.
+      await rm(configPath, { force: true }).catch(() => {});
+    }
   }
 
   if (exitCode === 28) {
