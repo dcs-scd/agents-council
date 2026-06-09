@@ -878,7 +878,30 @@ function selectConfiguredMembers(members: ModelCouncilMember[]): ModelCouncilMem
   return selected;
 }
 
+// Per-call latency instrumentation, gated on AGENTS_COUNCIL_PERF_LOG. Pure
+// observability: logs to stderr only and never alters the prompt, control flow,
+// or return value. Used to measure the per-member/per-phase timeline (and prove
+// whether the within-phase Promise.all is truly parallel) before optimizing.
+let perfBaseMs = 0;
 async function askMember(member: ModelCouncilMember, messages: ChatMessage[]): Promise<string> {
+  if (!readEnv("AGENTS_COUNCIL_PERF_LOG")) {
+    return dispatchMember(member, messages);
+  }
+  const startMs = Date.now();
+  if (perfBaseMs === 0) {
+    perfBaseMs = startMs;
+  }
+  try {
+    return await dispatchMember(member, messages);
+  } finally {
+    const endMs = Date.now();
+    process.stderr.write(
+      `PERF member=${member.name} provider=${member.provider} startMs=${startMs - perfBaseMs} endMs=${endMs - perfBaseMs} durMs=${endMs - startMs}\n`,
+    );
+  }
+}
+
+async function dispatchMember(member: ModelCouncilMember, messages: ChatMessage[]): Promise<string> {
   if (member.provider === "openrouter") {
     return askOpenRouter(member, messages);
   }

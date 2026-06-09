@@ -32,6 +32,52 @@
 <p class="sub">A running log of decisions not in the original ask, changes, tradeoffs, and things to know.
 Maintained across the build-out of the multi-model autonomous council. Newest section first.</p>
 
+<h2>Session 2026-06-09 — Behavior-preserving latency track (measure-first)</h2>
+
+<p class="sub">User asked for a <b>behavior-preserving</b> council-run speedup, explicitly distinct from the deliberation-quality redesign. Working in <code>modelCouncil.ts</code> / <code>council/summon.ts</code>.</p>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span> Measurement OVERTURNED the hypothesis — no behavior-preserving lever exists</h3>
+  <p class="meta">2026-06-09 · instrumented calibration (tiny prompt, 4 members, 1 round, 312s)</p>
+  <p>The pre-measurement plan blamed cold-start + <code>xhigh</code> on the subscription CLIs. The PERF timeline disproves all of it. Per-call durations: <b>Opus</b> 3.7–6.6s, <b>ChatGPT(xhigh)</b> 6–12s, <b>DeepSeek</b> 4–20s, <b>Kimi(Moonshot)</b> 7s then <b>72s / 104s / 116s</b>. Findings: (1) within-phase <code>Promise.all</code> is genuinely parallel (all members start within ~3ms) — no serialization bug; (2) cold-start is negligible (3.7s first call); (3) <code>xhigh</code> is cheap (6–12s); (4) the straggler that gates every phase is <b>Kimi/Moonshot generation latency</b> (10–15× the others), which is model behavior on the given prompt.</p>
+  <p class="why"><b>Why this kills the track:</b> every lever that would cut Kimi's time changes behavior (cap max_tokens → Hard Rule 1; terser prompt → different output; drop/swap Kimi → roster change) or is already optimal (parallelism). There is no byte-identical-prompt change that moves the critical path. Reporting the negative result rather than shipping a no-op (skill Rule 3/9).</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span> Negative result is definitive — confirmed 3 ways; Kimi must stay (user)</h3>
+  <p class="meta">2026-06-09 · isolated raw probes</p>
+  <p>User requires Kimi K2.6 as a member, so dropping it is out. Isolated single-call probes settle the remaining hypotheses: <b>(1) intrinsic, not retry</b> — one direct Moonshot call = 72.7s, <code>finish_reason=stop</code>, 76-token prompt, 3627 completion tokens incl. a 12.5k-char reasoning trace, ~50 tok/s; no retry/throttle. <b>(2) serving backend already optimal</b> — OpenRouter routes the same <code>kimi-k2.6</code> to Novita at 25.9 tok/s (~2× slower than direct Moonshot). So the existing direct-Moonshot config is the fastest serving path available.</p>
+  <p class="why"><b>Conclusion:</b> for a Kimi-K2.6-required council there is NO behavior-preserving speedup. The cost is Kimi's own reasoning-trace generation at the serving ceiling. Every remaining lever (max_tokens cap, take Kimi off the per-phase critical path, lower a reasoning toggle) changes output → belongs to the quality/redesign track or is a roster/config decision for the user.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag tradeoff">Tradeoff</span> Kept the flag-gated instrumentation; shipped no optimization</h3>
+  <p class="meta">2026-06-09</p>
+  <p>The only code change is the <code>AGENTS_COUNCIL_PERF_LOG</code> timing wrapper in <code>askMember</code> (off by default, stderr-only, prompts unchanged). Kept it because it is the mechanism that produced this finding and would be needed to validate any future tuning; trivially revertible if unwanted.</p>
+  <p class="why"><b>Why:</b> Karpathy surgical-changes says ship only what's needed — but here the measurement capability <i>is</i> the deliverable, since the honest answer to "speed it up without changing behavior" is "you can't, and here's the proof."</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span> Scope = behavior-preserving only</h3>
+  <p class="meta">2026-06-09</p>
+  <p>"Behavior-preserving" is defined strictly: every provider receives <b>byte-identical prompts</b> and the control flow is unchanged; only timing may differ. Result-changing levers (persistent per-member conversation, synthesize-not-select, turning on structured mode) are OUT of scope — they belong to the separate quality/redesign track.</p>
+  <p class="why"><b>Why:</b> a prior turn established these are different tracks with different guardrails (preserve-output vs. A/B quality oracle); the user picked the preserve-output one.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span> Measure before optimizing — added flag-gated timing to <code>askMember</code></h3>
+  <p class="meta">2026-06-09 · <code>AGENTS_COUNCIL_PERF_LOG</code></p>
+  <p>The "cold-start dominates" hypothesis was unverified. Whether ANY behavior-preserving headroom exists depends on the split between process-spawn overhead (attackable) and <code>xhigh</code> model inference (untouchable per Hard Rule 1), and on whether the within-phase <code>Promise.all</code> is truly parallel or accidentally serialized. Added per-call <code>{member, startMs, endMs, durMs}</code> logging, gated on <code>AGENTS_COUNCIL_PERF_LOG</code> (stderr only, no output change), to capture the timeline.</p>
+  <p class="why"><b>Why:</b> skill Rule 1 (no baseline, no optimization); refuse to ship a no-op.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span> Prompt caching is a cost win, not a latency win here</h3>
+  <p class="meta">2026-06-09</p>
+  <p><code>flattenMessageContent</code> drops <code>cache_control</code>, so the existing cache hint reaches only the API members (Kimi/DeepSeek/OpenRouter) — already the <i>fast</i> members, never the straggler. Subscription members (Claude/Codex) flatten to a string and can't use it. Excluded from this latency track.</p>
+  <p class="why"><b>Why:</b> avoid effort on a change that cannot move the critical path.</p>
+</div>
+
 <h2>Session 2026-06-09 — Post-review hardening (Hydra review since <code>fbfc9e8</code>)</h2>
 
 <p class="sub">Source: Hydra review run <code>hydra_20260609T0216_269058_ff9aff</code> (focus correctness+security; 0 critical/high, 5 medium, 9 low). User chose "Path B": apply the genuine code edits directly, hand back the test-debt as a separate list. Edits landed: L1/L2 in <code>fetchTextWithTimeout</code> (<code>modelCouncil.ts</code>), then M5 (a testable exit-code seam + test across <code>modelCouncil.ts</code> + <code>cli/index.ts</code>). M2 declined.</p>
