@@ -44,6 +44,43 @@ describe("WU-B6 issue-map partition (pure, deterministic — INV-5)", () => {
     expect(map.contested).toHaveLength(1);
     expect(map.contested[0]!.members).toEqual(["Opus 4.8"]);
   });
+
+  // L (post-hydra hardening): claims whose text normalizes to "" (blank or
+  // punctuation-only) are dropped at issueMap.ts:92 — they carry no assertion to
+  // corroborate, so they must never enter a cluster nor inflate totalClaims.
+  test("blank / punctuation-only claims are dropped and do not inflate totalClaims", () => {
+    const claims: IssueMapClaim[] = [
+      { member: "Opus 4.8", claimId: "a1", text: "   ", provenance: "assumption" },
+      { member: "Opus 4.8", claimId: "a2", text: "...", provenance: "assumption" },
+      { member: "Opus 4.8", claimId: "a3", text: "", provenance: "assumption" },
+      { member: "Opus 4.8", claimId: "a4", text: "a real claim", provenance: "repo_fact" },
+    ];
+    const map = buildIssueMap(claims);
+    expect(map.stats.totalClaims).toBe(1);
+    expect(map.stats.distinctClusters).toBe(1);
+    expect(map.agreed).toHaveLength(0);
+    expect(map.contested).toHaveLength(1);
+    expect(map.contested[0]!.representativeText).toBe("a real claim");
+  });
+
+  // L (post-hydra hardening): the stats block is the Wave-C misclustering /
+  // false-consensus instrument; pin every tally on a known agreed(1)/contested(2)
+  // partition so a regression in any counter is caught.
+  test("stats tallies count totalClaims / distinctClusters / agreed / contested", () => {
+    const claims: IssueMapClaim[] = [
+      { member: "Opus 4.8", claimId: "1", text: "use Bun", provenance: "repo_fact" },
+      { member: "ChatGPT 5.5", claimId: "2", text: "use bun", provenance: "repo_fact" },
+      { member: "Opus 4.8", claimId: "3", text: "tests are flaky", provenance: "assumption" },
+      { member: "Gemini", claimId: "4", text: "ship it", provenance: "assumption" },
+    ];
+    const map = buildIssueMap(claims);
+    expect(map.stats).toEqual({
+      totalClaims: 4,
+      distinctClusters: 3,
+      agreedClusters: 1,
+      contestedClusters: 2,
+    });
+  });
 });
 
 // --- Controller-isolation assertion (INV-3) ---------------------------------

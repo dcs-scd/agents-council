@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   ClaimSchema,
   DeliberationResponseSchema,
+  IndependentProposalSchema,
   RatificationVoteSchema,
   getParseFailStats,
   parseStructuredOrFallback,
@@ -80,6 +81,60 @@ describe("WU-B1 structured schemas", () => {
   // gate_zod_bundled smoke (also exercised from the compiled binary separately).
   test("schemaSelfTest passes (Zod evaluable)", () => {
     expect(schemaSelfTest().startsWith("SELFTEST PASS")).toBe(true);
+  });
+});
+
+// M3 (post-hydra hardening): the structured schemas are default-`.strip()`, not
+// `.strict()`, and the claim primitives carry `.min(1)` / enum constraints. Pin
+// both halves of that contract: unknown keys are silently dropped (never
+// preserved, never a hard reject), and structurally malformed payloads fail
+// `safeParse` so `parseStructuredOrFallback` routes them to the legacy parser.
+describe("WU-B1 schema strictness — unknown-key strip + malformed payloads (M3)", () => {
+  test("unknown keys are stripped from a valid ClaimSchema payload", () => {
+    const result = ClaimSchema.safeParse({
+      id: "c1",
+      text: "use Bun",
+      provenance: "repo_fact",
+      evidence: [],
+      bogusInjectedField: "should be dropped",
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect("bogusInjectedField" in result.data).toBe(false);
+    }
+  });
+
+  test("unknown keys are stripped from a DeliberationResponse payload", () => {
+    const result = DeliberationResponseSchema.safeParse({
+      candidateConsensus: "ship it",
+      claims: [],
+      smuggledControlField: true,
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect("smuggledControlField" in result.data).toBe(false);
+    }
+  });
+
+  test("ClaimSchema rejects empty id, empty text, non-array evidence, bad provenance", () => {
+    const base = { id: "c1", text: "t", provenance: "repo_fact", evidence: [] as string[] };
+    expect(ClaimSchema.safeParse({ ...base, id: "" }).success).toBe(false);
+    expect(ClaimSchema.safeParse({ ...base, text: "" }).success).toBe(false);
+    expect(ClaimSchema.safeParse({ ...base, evidence: "EV-1" }).success).toBe(false);
+    expect(ClaimSchema.safeParse({ ...base, provenance: "bogus" }).success).toBe(false);
+  });
+
+  test("RatificationVoteSchema rejects an unknown decision and an unknown blockKind", () => {
+    expect(RatificationVoteSchema.safeParse({ decision: "maybe" }).success).toBe(false);
+    expect(RatificationVoteSchema.safeParse({ decision: "block", blockKind: "NONSENSE" }).success).toBe(false);
+  });
+
+  test("a nested invalid Claim rejects the whole IndependentProposal", () => {
+    const result = IndependentProposalSchema.safeParse({
+      candidateConsensus: "ship it",
+      claims: [{ id: "", text: "t", provenance: "repo_fact", evidence: [] }],
+    });
+    expect(result.success).toBe(false);
   });
 });
 
