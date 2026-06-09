@@ -86,6 +86,21 @@ const main = async (): Promise<void> => {
       }
     });
 
+  program
+    .command("selftest")
+    .description("Run an internal schema self-test (proves Zod is bundled).")
+    .action(async () => {
+      // Dynamic import keeps the structured schema module off the default code
+      // paths (INV-2) while still exercising a real Zod parse from the compiled
+      // binary — the gate_zod_bundled evidence.
+      const { schemaSelfTest } = await import("../core/services/council/schemas");
+      const summary = schemaSelfTest();
+      console.log(summary);
+      if (!summary.startsWith("SELFTEST PASS")) {
+        process.exit(1);
+      }
+    });
+
   program.on("command:*", (operands: string[]) => {
     const command = operands[0] ?? "unknown";
     console.error(`Unknown command: ${command}`);

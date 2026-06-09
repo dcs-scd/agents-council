@@ -96,19 +96,40 @@ const rounds: ModelCouncilRound[] = [
 ];
 
 describe("model council prompt protocol", () => {
-  test("default roster is the two-member Opus 4.8 + GPT-5.5 council", () => {
+  test("default roster is the odd three-member Opus 4.8 + GPT-5.5 + Gemini council", () => {
     const previous = process.env.AGENTS_COUNCIL_MEMBERS;
     delete process.env.AGENTS_COUNCIL_MEMBERS;
 
     try {
       const members = buildDefaultMembers();
       // Opus is listed first so it chairs synthesis (members[0]).
-      expect(members.map((member) => member.id)).toEqual(["claude", "chatgpt"]);
+      expect(members.map((member) => member.id)).toEqual(["claude", "chatgpt", "gemini"]);
+      // Odd, >= 3, and heterogeneous across distinct providers (WU-B7).
+      expect(members.length % 2).toBe(1);
+      expect(members.length).toBeGreaterThanOrEqual(3);
+      expect(new Set(members.map((member) => member.provider)).size).toBe(members.length);
       const claude = members.find((member) => member.id === "claude");
       expect(claude?.model).toBe("claude-opus-4-8");
       expect(claude?.name).toBe("Opus 4.8");
       const chatgpt = members.find((member) => member.id === "chatgpt");
       expect(chatgpt?.model).toBe("gpt-5.5");
+      const gemini = members.find((member) => member.id === "gemini");
+      expect(gemini?.model).toBe("gemini-3.5-flash");
+    } finally {
+      restoreEnv("AGENTS_COUNCIL_MEMBERS", previous);
+    }
+  });
+
+  test("explicit AGENTS_COUNCIL_MEMBERS override still yields exactly n=2 for a cheap draft", () => {
+    const previous = process.env.AGENTS_COUNCIL_MEMBERS;
+    process.env.AGENTS_COUNCIL_MEMBERS = "claude,chatgpt";
+
+    try {
+      const members = buildDefaultMembers();
+      // Explicit two-member override is honored exactly — the odd>=3 default
+      // applies only when AGENTS_COUNCIL_MEMBERS is unset (WU-B7).
+      expect(members.map((member) => member.id)).toEqual(["claude", "chatgpt"]);
+      expect(members.length).toBe(2);
     } finally {
       restoreEnv("AGENTS_COUNCIL_MEMBERS", previous);
     }

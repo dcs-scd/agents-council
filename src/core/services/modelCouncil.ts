@@ -1,4 +1,5 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { Codex } from "@openai/codex-sdk";
@@ -25,12 +26,16 @@ const DEFAULT_CHATGPT_MODEL = "gpt-5.5";
 const DEFAULT_CHATGPT_REASONING_EFFORT = "xhigh" as const;
 const DEFAULT_CLAUDE_MODEL = "claude-opus-4-8";
 const MEMBERS_ENV = "AGENTS_COUNCIL_MEMBERS";
-// Default council roster when AGENTS_COUNCIL_MEMBERS is unset: exactly two
-// members — Opus 4.8 (Claude) and GPT-5.5 at xhigh reasoning (ChatGPT/Codex).
-// Claude is listed first so it chairs synthesis (members[0]). Set
-// AGENTS_COUNCIL_MEMBERS to choose a wider roster, e.g.
-// "kimi,deepseek,gemini,chatgpt,claude".
-const DEFAULT_MEMBER_IDS = ["claude", "chatgpt"] as const;
+// Default council roster when AGENTS_COUNCIL_MEMBERS is unset: an odd,
+// heterogeneous, three-member panel — Opus 4.8 (Claude), GPT-5.5 at xhigh
+// reasoning (ChatGPT/Codex), and Gemini 3.5 Flash. All three resolve through
+// locally-credentialed CLIs (claude/codex/gemini) and require no API-key env at
+// config-validation time, so the default run never depends on OPENROUTER_API_KEY
+// or a vendor key. Claude is listed first so it chairs synthesis (members[0]).
+// Set AGENTS_COUNCIL_MEMBERS to choose any other roster, e.g. "chatgpt,claude"
+// for a cheap two-member draft or "kimi,deepseek,gemini,chatgpt,claude" for the
+// full panel.
+const DEFAULT_MEMBER_IDS = ["claude", "chatgpt", "gemini"] as const;
 const OPENROUTER_TIMEOUT_ENV = "AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS";
 const OPENROUTER_URL_ENV = "AGENTS_COUNCIL_OPENROUTER_URL";
 const DIRECT_VENDOR_KEYS_ENV = "AGENTS_COUNCIL_DIRECT_VENDOR_KEYS";
@@ -184,8 +189,19 @@ export type ModelCouncilResult = {
   consensus: ModelCouncilConsensus;
 };
 
+// A single evidence-pack entry supplied by the caller. Plumbing only (WU-B3):
+// when present, entries are prepended to the round-0 proposal system message so
+// members can cite them. WU-B2 will consume the `id` for the Level-1 source-ID
+// check. Omitting the pack leaves proposal prompts byte-identical to legacy.
+export type EvidencePackEntry = {
+  id: string;
+  text: string;
+  source: string;
+};
+
 export type RunModelCouncilInput = {
   prompt: string;
+  evidencePack?: EvidencePackEntry[];
 };
 
 export type ModelCouncilFailure = {
@@ -281,7 +297,7 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
   const responses = await Promise.all(
     members.map(async (member) => ({
       member: toMemberRef(member),
-      content: await askMember(member, buildProposalMessages(prompt, member)),
+      content: await askMember(member, buildProposalMessages(prompt, member, input.evidencePack)),
     })),
   );
 
@@ -338,6 +354,24 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
   // fact agreed. The members' own ACCEPT/BLOCK votes are the real consensus test.
   const hasCandidate = candidateConsensus.trim().length > 0;
   let ratifications = hasCandidate ? await ratifyCandidate(members, prompt, rounds, candidateConsensus) : [];
+
+  // WU-B2: claim-ledger ratification preconditions. Under AGENTS_COUNCIL_STRUCTURED
+  // only (INV-2), inspect the structured claims the members emitted and prepend an
+  // absolute FACTUAL_ERROR block (via the existing veto machinery) for any member
+  // that emitted an unlabeled claim, an assumption with no cheapest_verification,
+  // or a repo_fact citing an id absent from the evidence pack (INV-9: pure code).
+  // With the flag off this is a no-op (returns []) and never imports the schema
+  // module, so the ratification path stays byte-for-byte legacy. INV-3: these
+  // blocks enter only the ratifications array, after the deliberation loop;
+  // isConverged is never given them. An absolute veto here also short-circuits the
+  // repair cycle below (shouldAttemptRepair), since synthesis cannot make an
+  // unverifiable claim verifiable.
+  if (hasCandidate) {
+    const preconditionBlocks = await evaluateRatificationPreconditions(deliberations, input.evidencePack);
+    if (preconditionBlocks.length > 0) {
+      ratifications = [...preconditionBlocks, ...ratifications];
+    }
+  }
 
   // Consensus repair (one bounded cycle). The council reasons in prose, so two
   // members who agree on substance routinely fail to emit byte-identical drafts
@@ -912,19 +946,39 @@ async function askDirectChatProvider(
 // Bun process completes in ~150s; Bun fetch hangs past 300s. Until Bun's HTTP
 // client fixes this, route OpenRouter calls through curl. Inputs/outputs match
 // the original fetch wrapper exactly so the caller (askOpenRouter) is unchanged.
-async function fetchTextWithTimeout(
+export async function fetchTextWithTimeout(
   url: string,
   init: RequestInit,
   timeoutMs: number,
 ): Promise<{ response: Response; rawText: string }> {
   const STATUS_SENTINEL = "\n__BUN_CURL_HTTP_STATUS__:";
-  const headerArgs: string[] = [];
+  // Headers (including `Authorization: Bearer <key>`) are written to a 0600
+  // temp curl config file and passed via `--config`, never as `-H` argv
+  // elements. This keeps the API key out of the spawned process argv, which is
+  // world-readable via `ps` / `/proc/<pid>/cmdline` (INV-1 / gate_no_bearer).
+  // stdin stays reserved for the POST body (`--data-binary @-`), so the config
+  // cannot ride on `-K -`; a temp file is used and unlinked after the process
+  // exits (curl has already read it by then).
   const headersInit = init.headers as Record<string, string> | undefined;
+  const configLines: string[] = [];
   if (headersInit) {
     for (const [key, value] of Object.entries(headersInit)) {
-      headerArgs.push("-H", `${key}: ${value}`);
+      // curl config syntax: `header = "Key: Value"`. Escape backslashes and
+      // double-quotes so a header value can never break out of the quoted form.
+      const headerValue = `${key}: ${value}`.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      configLines.push(`header = "${headerValue}"`);
     }
   }
+
+  let configPath: string | null = null;
+  if (configLines.length > 0) {
+    configPath = path.join(
+      tmpdir(),
+      `agents-council-curl-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.cfg`,
+    );
+    await writeFile(configPath, `${configLines.join("\n")}\n`, { mode: 0o600 });
+  }
+
   const method = (init.method ?? "GET").toUpperCase();
   const body = typeof init.body === "string" ? init.body : null;
   const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
@@ -935,7 +989,7 @@ async function fetchTextWithTimeout(
     method,
     "--max-time",
     String(timeoutSeconds),
-    ...headerArgs,
+    ...(configPath !== null ? ["--config", configPath] : []),
     ...(body !== null ? ["--data-binary", "@-"] : []),
     "--write-out",
     `${STATUS_SENTINEL}%{http_code}`,
@@ -960,6 +1014,11 @@ async function fetchTextWithTimeout(
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
+
+  if (configPath !== null) {
+    // Best-effort cleanup; curl has already consumed the config by exit.
+    await rm(configPath, { force: true }).catch(() => {});
+  }
 
   if (exitCode === 28) {
     // curl exit code 28 = operation timed out
@@ -1161,22 +1220,42 @@ async function askClaude(member: ModelCouncilMember, messages: ChatMessage[]): P
   return content;
 }
 
-export function buildProposalMessages(prompt: string, member: ModelCouncilMember): ChatMessage[] {
+export function buildProposalMessages(
+  prompt: string,
+  member: ModelCouncilMember,
+  evidencePack?: EvidencePackEntry[],
+): ChatMessage[] {
+  const baseSystem = [
+    `You are ${member.name}, one member of a multi-agent council.`,
+    OBJECTIVE_CONSENSUS_DIRECTIVE,
+    "Give your independent answer to the user's problem.",
+    "Be concrete, identify risks, state your recommended solution, and flag what would change your mind.",
+  ].join(" ");
+
+  // Evidence-pack plumbing (WU-B3): prepend supplied entries to the proposal
+  // system message so members can cite them by id. When no pack is supplied the
+  // system message is byte-identical to the legacy prompt (INV-2).
+  const systemContent =
+    evidencePack && evidencePack.length > 0 ? `${formatEvidencePack(evidencePack)}\n\n${baseSystem}` : baseSystem;
+
   return [
     {
       role: "system",
-      content: [
-        `You are ${member.name}, one member of a multi-agent council.`,
-        OBJECTIVE_CONSENSUS_DIRECTIVE,
-        "Give your independent answer to the user's problem.",
-        "Be concrete, identify risks, state your recommended solution, and flag what would change your mind.",
-      ].join(" "),
+      content: systemContent,
     },
     {
       role: "user",
       content: prompt,
     },
   ];
+}
+
+// Render the evidence pack as a stable, citable block for the proposal prompt.
+// Each entry is keyed by its id so a downstream Level-1 source-ID check (WU-B2)
+// can verify cited ids against the supplied pack.
+function formatEvidencePack(evidencePack: EvidencePackEntry[]): string {
+  const entries = evidencePack.map((entry) => `- [${entry.id}] (${entry.source}) ${entry.text}`).join("\n");
+  return `Evidence pack (cite entries by their [id] when you rely on them):\n${entries}`;
 }
 
 export function buildDeliberationMessages(
@@ -1413,6 +1492,199 @@ export function parseConsensusSignal(content: string): ConsensusSignal {
       .trim() ?? "";
   const hasMaterialDisagreements = disagreements.length > 0 && !/^NONE$/i.test(disagreements);
   return { status, hasMaterialDisagreements, disagreements };
+}
+
+// --- Structured (Claim-Ledger Delphi) parse seam — WU-B1 -------------------
+//
+// Additive, flag-gated wrappers around the legacy text parsers above. INV-2:
+// the structured `schemas` module is reachable ONLY under
+// `AGENTS_COUNCIL_STRUCTURED`, and is loaded ONLY via the guarded dynamic
+// import() inside the flag branch — so the legacy (flag-off) path never imports
+// or evaluates it, and the legacy sync parsers above are untouched (byte-for-
+// byte). INV-7: these wire additively into the existing parsers; no fork.
+//
+// When the flag is off these wrappers return the legacy parse synchronously,
+// without touching the schema module. When the flag is on, they attempt a Zod
+// validation of a structured payload and fall back to the same legacy parser on
+// any validation failure (incrementing the per-run parse-fail counter).
+
+export function isStructuredCouncilEnabled(): boolean {
+  return process.env.AGENTS_COUNCIL_STRUCTURED === "1" || process.env.AGENTS_COUNCIL_STRUCTURED === "true";
+}
+
+export async function parseRatificationVoteStructured(content: string): Promise<RatificationVote> {
+  if (!isStructuredCouncilEnabled()) {
+    return parseRatificationVote(content);
+  }
+  const { parseStructuredOrFallback, RatificationVoteSchema } = await import("./council/schemas");
+  const result = parseStructuredOrFallback(content, RatificationVoteSchema, parseRatificationVote);
+  // The structured schema omits `raw`; rehydrate the legacy shape so downstream
+  // consumers (which read `vote.raw`) keep working.
+  if ("raw" in result) {
+    return result;
+  }
+  return { ...result, raw: content };
+}
+
+export async function parseConsensusSignalStructured(content: string): Promise<ConsensusSignal> {
+  if (!isStructuredCouncilEnabled()) {
+    return parseConsensusSignal(content);
+  }
+  const { parseStructuredOrFallback, DeliberationResponseSchema } = await import("./council/schemas");
+  const fallbackToSignal = (raw: string): ConsensusSignal => parseConsensusSignal(raw);
+  const parsed = parseStructuredOrFallback(content, DeliberationResponseSchema, fallbackToSignal);
+  if ("status" in parsed && "hasMaterialDisagreements" in parsed) {
+    // Legacy fallback already produced a ConsensusSignal.
+    return parsed;
+  }
+  const disagreements = (parsed.materialDisagreements ?? []).join("; ");
+  return {
+    status: parsed.consensusStatus ?? "unknown",
+    hasMaterialDisagreements: (parsed.materialDisagreements ?? []).length > 0,
+    disagreements,
+  };
+}
+
+export async function parseCandidateConsensusStructured(content: string): Promise<string> {
+  if (!isStructuredCouncilEnabled()) {
+    return parseCandidateConsensus(content);
+  }
+  const { parseStructuredOrFallback, DeliberationResponseSchema } = await import("./council/schemas");
+  const parsed = parseStructuredOrFallback(content, DeliberationResponseSchema, parseCandidateConsensus);
+  return typeof parsed === "string" ? parsed : parsed.candidateConsensus;
+}
+
+// --- Claim-ledger ratification preconditions — WU-B2 -----------------------
+//
+// Block-preconditions on ratification ELIGIBILITY (not a new controller). Under
+// AGENTS_COUNCIL_STRUCTURED they inspect the structured claims members emitted
+// and raise an absolute block through the EXISTING BLOCK_KIND/veto machinery
+// when a claim is unverifiable. Three deterministic checks (INV-9 — pure code,
+// no LLM, no sandbox, no network):
+//   1. an unlabeled factual claim (a claim with no provenance label);
+//   2. an `assumption` with no stated cheapest_verification;
+//   3. Level-1 source-ID (Addendum A.3.3): a `repo_fact` whose cited
+//      evidence-pack id is not present in the supplied pack.
+// A fired precondition is surfaced as a FACTUAL_ERROR block — already the
+// absolute kind (F7), so it ends the council at "blocked" and skips repair
+// (INV-4 preserved: we RAISE a block via the existing enum, we do not weaken
+// any veto's absoluteness). INV-3: these blocks enter only the ratifications
+// array, after the deliberation loop; isConverged never reads them.
+
+// The shape a structured member payload may carry claims under. Members emit a
+// DeliberationResponse / IndependentProposal whose `claims` we inspect; we read
+// the claim fields tolerantly (a partial / loosely-typed payload still gets
+// checked rather than silently passing).
+type ClaimLike = {
+  provenance?: string;
+  evidence?: unknown;
+  cheapestVerification?: unknown;
+  cheapest_verification?: unknown;
+};
+
+export type RatificationPrecondition = {
+  kind: "UNLABELED_CLAIM" | "ASSUMPTION_NO_VERIFICATION" | "SOURCE_ID_MISMATCH";
+  detail: string;
+};
+
+// Pure, deterministic evaluation of the three claim-ledger preconditions over a
+// set of structured claims and the supplied evidence-pack ids (INV-9). No model
+// call, no eval/sandbox, no network. Returns every precondition that fired.
+export function evaluateClaimLedgerPreconditions(
+  claims: ClaimLike[],
+  evidencePackIds: ReadonlySet<string>,
+): RatificationPrecondition[] {
+  const fired: RatificationPrecondition[] = [];
+  for (const claim of claims) {
+    const provenance = typeof claim.provenance === "string" ? claim.provenance.trim() : "";
+    // (1) Unlabeled factual claim: no provenance label at all.
+    if (provenance.length === 0) {
+      fired.push({ kind: "UNLABELED_CLAIM", detail: "a factual claim was emitted with no provenance label" });
+      continue;
+    }
+    // (2) Assumption with no stated cheapest verification.
+    if (provenance === "assumption") {
+      const verification = claim.cheapestVerification ?? claim.cheapest_verification;
+      const stated = typeof verification === "string" && verification.trim().length > 0;
+      if (!stated) {
+        fired.push({
+          kind: "ASSUMPTION_NO_VERIFICATION",
+          detail: "an assumption was emitted with no stated cheapest_verification",
+        });
+      }
+      continue;
+    }
+    // (3) Level-1 deterministic source-ID check: a repo_fact must cite an id
+    // present in the supplied evidence pack. A repo_fact citing nothing, or an
+    // id absent from the pack, fails the check.
+    if (provenance === "repo_fact") {
+      const cited = Array.isArray(claim.evidence)
+        ? claim.evidence.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+        : [];
+      const missing = cited.length === 0 ? [""] : cited.filter((id) => !evidencePackIds.has(id.trim()));
+      if (missing.length > 0) {
+        const citedDesc = cited.length === 0 ? "no evidence-pack id" : `id(s) ${missing.join(", ")}`;
+        fired.push({
+          kind: "SOURCE_ID_MISMATCH",
+          detail: `a repo_fact cited ${citedDesc} not present in the evidence pack`,
+        });
+      }
+    }
+  }
+  return fired;
+}
+
+// Synthesize a block ratification carrying the existing FACTUAL_ERROR kind from a
+// fired precondition. Attributed to the member whose payload tripped it so the
+// transcript and minority report (WU-B4) can name the source.
+function preconditionBlockRatification(
+  member: MemberRef,
+  preconditions: RatificationPrecondition[],
+): ModelCouncilRatification {
+  const detail = preconditions.map((p) => `${p.kind}: ${p.detail}`).join("; ");
+  return {
+    member,
+    content: `CONSENSUS: BLOCK\nBLOCK_KIND: FACTUAL_ERROR\nClaim-ledger precondition(s) failed: ${detail}`,
+    accepted: false,
+    vote: {
+      decision: "block",
+      blockKind: "FACTUAL_ERROR",
+      raw: `claim-ledger precondition: ${detail}`,
+    },
+  };
+}
+
+// Flag-gated applier: under AGENTS_COUNCIL_STRUCTURED only, parse each member's
+// final-round content for structured claims (via the WU-B1 guarded dynamic
+// import — never a top-level static import), run the pure preconditions against
+// the evidence-pack ids, and return one synthetic FACTUAL_ERROR block per member
+// that tripped a precondition. Flag OFF (INV-2): returns [] WITHOUT importing the
+// schema module or inspecting any label — the legacy ratification path is then
+// byte-for-byte unchanged.
+export async function evaluateRatificationPreconditions(
+  proposals: ModelCouncilCandidateProposal[],
+  evidencePack: EvidencePackEntry[] | undefined,
+): Promise<ModelCouncilRatification[]> {
+  if (!isStructuredCouncilEnabled()) {
+    return [];
+  }
+  const { parseStructuredOrFallback, DeliberationResponseSchema } = await import("./council/schemas");
+  const evidencePackIds = new Set((evidencePack ?? []).map((entry) => entry.id));
+  const blocks: ModelCouncilRatification[] = [];
+  for (const proposal of proposals) {
+    // Extract structured claims if the member emitted a parseable structured
+    // payload; a non-structured (legacy text) payload yields no claims and so
+    // cannot trip a precondition — the heuristic is best-effort in Wave B.
+    const parsed = parseStructuredOrFallback(proposal.content, DeliberationResponseSchema, () => null);
+    if (parsed === null || typeof parsed === "string" || !("claims" in parsed)) {
+      continue;
+    }
+    const fired = evaluateClaimLedgerPreconditions(parsed.claims as ClaimLike[], evidencePackIds);
+    if (fired.length > 0) {
+      blocks.push(preconditionBlockRatification(proposal.member, fired));
+    }
+  }
+  return blocks;
 }
 
 export function buildCandidateConsensus(proposals: ModelCouncilCandidateProposal[]): string {
