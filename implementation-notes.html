@@ -32,6 +32,29 @@
 <p class="sub">A running log of decisions not in the original ask, changes, tradeoffs, and things to know.
 Maintained across the build-out of the multi-model autonomous council. Newest section first.</p>
 
+<h2>Session 2026-06-09 — WU-B5 + WU-B6 executed (structured trace + observational issue map)</h2>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span> The B5 trace reuses the <code>council_to_brief.py</code> skeleton as its top level, with per-claim detail as an additive array</h3>
+  <div class="meta">2026-06-09 · <code>trace-{ts}.json</code> (<code>agents-council.council_trace.v1</code>)</div>
+  <p>The brief required the trace to "match what <code>council_to_brief.py</code> consumes." I read that parser: it requires top keys <code>prompt / members / consensus{reached,ratifiedBy,blockedBy} / converged / rounds{index,changed,memberAgreement}</code> and reads <code>candidateConsensus</code> as the final prose. The existing <code>council-{ts}.json</code> already <em>is</em> that shape (it is the serialized <code>ModelCouncilResult</code>), so I made the trace carry the same skeleton verbatim and appended the genuine B5 deliverable — a flat <code>claims[]</code> of <code>{round,member,claimId,text,provenance,evidence}</code> — as an additive field the parser ignores. A real generated trace parses cleanly through both <code>--format json</code> and <code>--format brief</code>.</p>
+  <p class="why"><b>Why:</b> the consumer contract is satisfied by reusing the proven skeleton; the per-claim/per-member/per-round requirement rides alongside without forking the schema the external tool already trusts.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span> Both writes live in ONE flag branch in <code>saveModelCouncilRun</code>; the controller-isolation proof is two-pronged</h3>
+  <div class="meta">2026-06-09 · <code>src/core/services/modelCouncil.ts</code>, new <code>src/core/services/council/issueMap.ts</code></div>
+  <p>B5 and B6 both edit <code>saveModelCouncilRun</code>, so I added a single <code>if (isStructuredCouncilEnabled())</code> branch that writes both <code>trace-{ts}.json</code> and <code>issue-map-{ts}.json</code> from a shared <code>extractStructuredClaims</code> helper (one WU-B1 guarded dynamic import). The issue map (B6) is the BUILD-construction default per Addendum A.5 — deterministic normalized exact-match clustering into agreed (&gt;1 distinct member) / contested (lone), no embeddings — in its own ~140-LOC module. For INV-3 (the map controls nothing) I assert isolation two ways: <em>structural</em> (a forged max-agreed <code>issueMap</code> field bolted onto the round handed to <code>isConverged</code> changes no verdict) and <em>value</em> (<code>isConverged</code>'s verdict is identical before vs. after a real issue-map file is written).</p>
+  <p class="why"><b>Why:</b> a single flag branch keeps INV-2 trivially auditable (flag off → neither file, no schema import); the structural+value pair proves non-control both at the type/input boundary and at runtime, which a single check would not.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">FYI</span> Equal member weight is baked in, and Wave-B's strict <code>ClaimSchema</code> limits which clusters/preconditions can fire</h3>
+  <div class="meta">2026-06-09</div>
+  <p>WU-B5 mandates "never weight by prestige": every member entry in the trace carries <code>weight: 1</code> and nothing reads a prestige signal; the issue map counts each member once per cluster, so a member repeating a claim cannot manufacture "agreed." Note (carried from WU-B2): the strict <code>ClaimSchema</code> (provenance required, no <code>cheapest_verification</code> field) means a member emitting a literally unlabeled claim fails the structured parse and contributes no claims to either artifact — clustering and trace detail are best-effort over <em>well-formed</em> structured payloads, as Wave B intends.</p>
+  <p class="why"><b>Why:</b> flag the weight invariant and the schema-strictness boundary so acceptance doesn't read "fewer claims than members emitted" as a bug — it is the parse contract.</p>
+</div>
+
 <h2>Session 2026-06-09 — WU-B4 executed (minority report + CLI blocked exit code)</h2>
 
 <div class="entry">

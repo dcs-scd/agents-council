@@ -636,7 +636,111 @@ export async function saveModelCouncilRun(
   const markdownPath = path.join(deliberationsDir, `council-${timestamp}.md`);
   await writeFile(jsonPath, `${JSON.stringify(result, null, 2)}\n`, "utf8");
   await writeFile(markdownPath, formatModelCouncilMarkdown(result), "utf8");
+  // INV-2: the structured trace (WU-B5) and the observational issue map (WU-B6)
+  // are written ONLY under AGENTS_COUNCIL_STRUCTURED. Flag OFF, the two writes
+  // above are the byte-for-byte legacy output and nothing below executes — no
+  // trace file, no issue-map file, no schema-module import.
+  if (isStructuredCouncilEnabled()) {
+    const claims = await extractStructuredClaims(result);
+    // WU-B5: per-claim / per-member / per-round structured trace + outcome,
+    // alongside council-{ts}.json/.md. Equal member weights — never by prestige.
+    const tracePath = path.join(deliberationsDir, `trace-${timestamp}.json`);
+    await writeFile(tracePath, `${JSON.stringify(buildStructuredTrace(result, claims), null, 2)}\n`, "utf8");
+    // WU-B6: observational, non-controlling issue map (INV-3) — deterministic
+    // exact-match clustering of the schema-validated claims (INV-5).
+    const { buildIssueMap } = await import("./council/issueMap");
+    const issueMapPath = path.join(deliberationsDir, `issue-map-${timestamp}.json`);
+    await writeFile(issueMapPath, `${JSON.stringify(buildIssueMap(claims.map(toIssueMapClaim)), null, 2)}\n`, "utf8");
+  }
   return { jsonPath, markdownPath };
+}
+
+// --- Structured artifact extraction — WU-B5 / WU-B6 ------------------------
+//
+// One schema-validated claim, projected from a member's structured payload in a
+// specific round. Equal member weight is intrinsic: a claim is attributed to its
+// proposing member and never carries a prestige weight (WU-B5 invariant).
+type StructuredClaim = {
+  round: number;
+  member: string;
+  claimId: string;
+  text: string;
+  provenance: string;
+  evidence: string[];
+};
+
+// Project a StructuredClaim to the issue-map input shape (WU-B6). Round is
+// dropped — clustering corroborates a statement across MEMBERS, regardless of
+// which round each member asserted it in.
+function toIssueMapClaim(claim: StructuredClaim): import("./council/issueMap").IssueMapClaim {
+  return { member: claim.member, claimId: claim.claimId, text: claim.text, provenance: claim.provenance };
+}
+
+// Extract every schema-validated claim from a result's rounds. Under the flag
+// only (caller gates on isStructuredCouncilEnabled): each proposal is parsed via
+// the WU-B1 guarded dynamic import; a member that emitted legacy text (not a
+// structured payload with `claims`) contributes nothing — best-effort in Wave B,
+// never throws. Deterministic over the persisted result. Returns claims in
+// (round, member, claim) input order. INV-5: pure parse, no LLM/network.
+async function extractStructuredClaims(result: ModelCouncilResult): Promise<StructuredClaim[]> {
+  const { parseStructuredOrFallback, DeliberationResponseSchema } = await import("./council/schemas");
+  const out: StructuredClaim[] = [];
+  for (const round of result.rounds) {
+    for (const proposal of round.proposals) {
+      const parsed = parseStructuredOrFallback(proposal.content, DeliberationResponseSchema, () => null);
+      if (parsed === null || typeof parsed === "string" || !("claims" in parsed)) {
+        continue;
+      }
+      for (const claim of parsed.claims) {
+        out.push({
+          round: round.index,
+          member: proposal.member.name,
+          claimId: claim.id,
+          text: claim.text,
+          provenance: claim.provenance,
+          evidence: claim.evidence,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+// Build the per-claim / per-member / per-round structured trace (WU-B5). The
+// top-level skeleton (prompt, members{id,name,provider,model}, consensus, rounds,
+// converged, candidateConsensus) matches the council_to_brief.py contract
+// (deliberations/*.json) so the external consumer parses a trace file identically
+// to a council-{ts}.json; the additive `claims` array carries the structured
+// per-claim/per-member/per-round detail. Equal member weight: every member entry
+// carries weight 1 and no field weights any member by prestige.
+function buildStructuredTrace(
+  result: ModelCouncilResult,
+  claims: StructuredClaim[],
+): {
+  schema_version: "agents-council.council_trace.v1";
+  prompt: string;
+  members: (ModelCouncilMember & { weight: number })[];
+  rounds: { index: number; changed: boolean; memberAgreement: number }[];
+  consensus: ModelCouncilConsensus;
+  converged: boolean;
+  candidateConsensus: string;
+  claims: StructuredClaim[];
+} {
+  return {
+    schema_version: "agents-council.council_trace.v1",
+    prompt: result.prompt,
+    // Equal member weights — never weight by prestige (WU-B5 invariant).
+    members: result.members.map((member) => ({ ...member, weight: 1 })),
+    rounds: result.rounds.map((round) => ({
+      index: round.index,
+      changed: round.changed,
+      memberAgreement: round.memberAgreement,
+    })),
+    consensus: result.consensus,
+    converged: result.converged,
+    candidateConsensus: result.candidateConsensus,
+    claims,
+  };
 }
 
 export async function saveModelCouncilFailure(input: { prompt: string; error: string }): Promise<{
