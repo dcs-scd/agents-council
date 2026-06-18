@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Implementation Notes — Tier 10 Council Runner</title>
+<style>
+  body { font: 15px/1.6 -apple-system, system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+  h1 { border-bottom: 2px solid #333; padding-bottom: .3rem; }
+  .entry { border-left: 3px solid #ccc; padding: .5rem 1rem; margin: 1rem 0; background: #fafafa; }
+  .ts { color: #666; font-size: .85em; }
+  .tag { font-weight: 700; font-size: .8em; padding: .1rem .4rem; border-radius: 3px; color: #fff; }
+  .DECISION { background: #2563eb; } .OFF-SPEC { background: #dc2626; }
+  .TRADEOFF { background: #d97706; } .FYI { background: #4b5563; }
+  .why { color: #444; font-style: italic; }
+  code { background: #eee; padding: .05rem .3rem; border-radius: 3px; font-size: .9em; }
+</style>
+</head>
+<body>
+<h1>Implementation Notes — Tier 10 Council Runner</h1>
+<p>Task: run a 4-member agents-council to write a detailed IP-HOPE Tier 10
+("Priced Objectives / Mission Negotiation") implementation plan, seeded by the
+existing description in <code>hope_program_archive/03_tiers/tier10_implementation_plan.md</code>.
+Build artifact: <code>agents-council/harness/run_tier10_council.ts</code>.</p>
+<!-- newest entry first; prepend new entries directly below this line -->
+
+<div class="entry">
+  <span class="ts">2026-06-15 15:20</span> <span class="tag OFF-SPEC">OFF-SPEC</span>
+  <p>Started HALO-X run <code>run-20260615T214208Z-96ea562e</code> (stage=plan) in the <strong>primary checkout</strong>
+  of the <code>hope</code> repo (its own git root, toplevel <code>/home/dstefanescu/other_systems/o4/hope</code>), using the
+  sanctioned single-run-in-main-tree opt-in (<code>touch .halo-x/ALLOW_PRIMARY</code>) instead of Hard Rule 8's default
+  worktree isolation.</p>
+  <p class="why">Why: pre-flight showed a fully clean slot (no <code>CURRENT</code>, no HALO processes, <code>HALO_X_RUN_ID</code>
+  unset) ⇒ zero parallel-collision risk, the only thing worktree isolation buys. A fresh worktree would also <em>lose</em> the
+  untracked brief + <code>tier10_plan_ratified.md</code> and break codegraph grounding. Opt-in is documented; reversible (rm the marker).</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 15:20</span> <span class="tag FYI">FYI</span>
+  <p>Grounding correction for the architect: the brief's <code>ip_hope/tier10/</code> "peer to tier8/tier9" is a consensus
+  abstraction. The hope repo's real convention is <code>ip_hope_tier_N/</code>, and <code>ip_hope_tier_8/</code> +
+  <code>ip_hope_tier_9/</code> already exist as top-level dirs ⇒ Tier 10's home is <strong><code>ip_hope_tier_10/</code></strong>,
+  NOT under <code>ip_hope_more_tiers/</code> (which holds only the archive + the <code>tier10_council</code> scratch dir).
+  The autogrounding filter (<code>ip_hope_more_tiers/</code>, 0/16 symbols) is mis-scoped — expected for a greenfield tier, but
+  the architect must target <code>ip_hope_tier_10/</code>.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 15:20</span> <span class="tag DECISION">DECISION</span>
+  <p>Plan stage will be fed BOTH <code>tier10_plan_ratified.md</code> (detailed substance) and <code>PLAN_INPUT_BRIEF.md</code>
+  (verdict + 3 falsifiers as kill-gates), not the brief alone. The four pipeline skills are <code>disable-model-invocation: true</code>
+  ⇒ the plan stage is <strong>user-fired</strong> (I cannot invoke <code>implementation-plan</code>); the run is started so the
+  guard will admit it.</p>
+  <p class="why">Why: the council's value was a detailed buildable plan; re-deriving from the lossy capped brief would discard it.
+  The ratified plan is a clean 646-line artifact (not the 1.1 MB transcript), so feeding it does not violate the bridge's
+  no-raw-transcript invariant.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 15:05</span> <span class="tag DECISION">DECISION</span>
+  <p>council→HALO-X handoff via the <code>council-to-halo</code> skill. Ran the deterministic extractor
+  (<code>council_to_brief.py</code>, brief mode) → <code>tier10_council/PLAN_INPUT_BRIEF.md</code> (council-brief/v1,
+  124 lines), then the judgment pass. The consensus excerpt was capped at 4096 bytes mid-"Assumptions and binding
+  resolutions," so I grounded both placeholder sections strictly in the spans present (INV-1 / no-invention):
+  <strong>Recommended path</strong> = 5 bullets (the binding resolutions: Python 3.11 @ <code>ip_hope/tier10/</code>,
+  headline/tangent split, signed cross-rate with mandatory minus, CP-primary calibration, revoke-fast/restore-slow);
+  <strong>Falsifiers</strong> = F1 tangent-as-headline (§2 trap), F2 dropped cross-rate minus / non-∂J numerator chain,
+  F3 fractional-count BetaInv mislabeled CP / ungated restoration — each mapped to a T10/U-acceptance criterion, severity HIGH.</p>
+  <p class="why">Why: HALO-X owns implementation (Hard Rule 8); the bridge is the pre-plan decision gate and only the
+  bounded brief crosses into HALO. Read-only w.r.t. <code>agents-council/</code> and <code>.halo-x/runs/</code>. Next move
+  (<code>/halo-x-run plan</code>) is user-fired.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 15:05</span> <span class="tag FYI">FYI</span>
+  <p>Brief vs. full plan: the brief's recommended-path/falsifiers are distilled from the <em>capped, pre-edit</em>
+  consensus excerpt — they predate my 3 folded ChatGPT edits but are consistent with them (path bullet #2 and F1 both
+  encode the headline-is-secant-not-tangent resolution that edit#1 enforces). The detailed, edited deliverable is
+  <code>tier10_council/tier10_plan_ratified.md</code> (646 lines); the brief is the bounded HALO plan-input, not a replacement for it.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 14:50</span> <span class="tag DECISION">DECISION</span>
+  <p>Folded ChatGPT 5.5's 3 required edits into the ratified plan. Materialized the council deliverable
+  (top-level <code>candidateConsensus</code>) to <code>hope/ip_hope_more_tiers/tier10_council/tier10_plan_ratified.md</code>
+  (646 lines) — a NEW file; did not overwrite the seed. Edits, each tagged <code>ChatGPT edit#N</code> in the file:
+  <strong>#1</strong> U1 <code>compute_headline_effect</code> in-TR branch now returns <code>secant_effect(c0, c0+delta)</code>
+  instead of <code>tr.analytic_rate * delta</code> (tangent stays diagnostic-only);
+  <strong>#2</strong> U2 <code>generate</code> skip-list <code>[GREY, RED]</code> → <code>[GREY, RED, RESTORING]</code>
+  + comment at the candidate tail updated (RESTORING filtered at top, AMBER still human-only);
+  <strong>#3</strong> <code>what_does</code> → <code>PriceCertificate | QuoteRefusal</code> and
+  <code>authority_type</code> → <code>Literal[...,"NONE"] | None</code>.</p>
+  <p class="why">Why: the plan is ratifiable once the 4th member's edits fold in; these are surgical patches to named
+  symbols, not redesigns. Verified by grep: 0 hits of each old pattern, 5 edit markers present, <code>analytic_rate</code>
+  survives only in diagnostic contexts (L16/201/355/519).</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 14:50</span> <span class="tag OFF-SPEC">OFF-SPEC</span>
+  <p>Edit#3 consequential coherence change: also made <code>authority_id: str</code> → <code>str | None</code>.
+  ChatGPT's text named only <code>authority_type</code>, but a SHADOW dry-run / REJECTED audit record with
+  <code>authority_type=None</code> has no <code>authority_id</code> either — leaving it required-<code>str</code>
+  would be internally inconsistent.</p>
+  <p class="why">Why: matched the model's existing required-nullable style (cf. <code>matched_envelope_id: str | None</code>);
+  minimal change needed to keep edit#3 coherent. Flagging because it exceeds ChatGPT's literal wording.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 14:28</span> <span class="tag FYI">FYI</span>
+  <p>Tier 10 council COMPLETED (~54 min, 13:33→14:28, direct vendor APIs, clean slot). Engine outcome
+  <code>blocked</code> / <code>reached:false</code> is the documented <em>labeling artifact</em>, NOT a veto:
+  all four members substantively endorsed the plan — Opus 4.8 ACCEPT, Kimi K2.6 ACCEPT, DeepSeek V4 Pro ACCEPT,
+  ChatGPT 5.5 <strong>ACCEPT_WITH_EDITS</strong> (3 required edits), and its <code>minorityReport.absolute=false</code>.
+  Deliverable = top-level <code>candidateConsensus</code> (47,816 chars / ~12K tok) in
+  <code>deliberations/council-2026-06-15T14-28-12-603Z.json</code> (+ <code>.md</code>). ChatGPT's 3 edits:
+  (1) U1 <code>compute_headline_effect</code> must use a verified secant/effect path, never the tangent
+  <code>analytic_rate</code> as the calibrated headline; (2) U2 treat <code>RESTORING</code> like revoked
+  (no proposals until GREEN; AMBER human-only/envelope-inert); (3) <code>NegotiationAPI.what_does</code> →
+  <code>PriceCertificate | QuoteRefusal</code>, allow <code>authority_type=None/"NONE"</code> for SHADOW/rejected.</p>
+  <p class="why">Why: the saved <code>.json</code> is the verdict authority; reading per-member votes (not the
+  <code>outcome</code> string) shows unanimous accept-with-3-edits, so the plan is ratifiable once the edits fold in.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 13:35</span> <span class="tag DECISION">DECISION</span>
+  <p>Tier 10 council launched via <code>run-council4</code> into a clean slot, 20-min/call timeout
+  (<code>AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS=1200000</code>; live curls confirm <code>--max-time 1200</code>).
+  Validated kimi first (user choice): a single curl call on the exact Tier 10 prompt
+  <b>completed in 464s, finish=stop</b>, <code>completion_tokens=18833</code> (visible answer ≈6146 tokens →
+  ~12.7k are hidden reasoning tokens). So the original 600s failure was kimi's long reasoning generation on
+  deliberation-round calls crossing the ceiling — not the provider, not the prompt size (a 59.6 KB prompt
+  completed on 2026-06-08). 20 min = 2.6× the observed solo latency, margin for longer deliberation rounds.</p>
+  <p class="why">Why: don't commit a [VERY HIGH] multi-round run on an unvalidated timeout; measure the one
+  expensive call, then size the ceiling from data.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 13:35</span> <span class="tag DECISION">DECISION</span>
+  <p>Serialized behind a concurrent <em>other-session</em> run-council4 (Fable v2 brief) instead of running
+  both at once (user choice). A waiter script (<code>/tmp/tier10_wait_and_launch.sh</code>, backgrounded)
+  polled for the Fable v2 driver to exit, then launched Tier 10. Fable v2 finished ~13:32 (ACCEPT consensus),
+  so the wait was brief and Tier 10 came up at 13:33:47 with no overlap.</p>
+  <p class="why">Why: avoid loading the machine + shared claude/codex subscriptions with two [VERY HIGH]
+  councils and avoid jeopardizing the other session's run; a clean serial slot reproduces the solo conditions
+  the pilot succeeded under.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 13:35</span> <span class="tag FYI">FYI</span>
+  <p><b>Two process-check false positives this session — verify by PID.</b> (1) An RTK-sampled piped
+  <code>ps aux | grep</code> earlier dropped the bun line → I mis-read a live run as dead. (2) A
+  <code>pgrep -f "…fablev2"</code> matched <em>its own command line</em> (the pattern string was in the shell
+  argv) → false "still running" on an already-finished run. Both resolved only by checking specific PIDs with
+  <code>ps -p</code>. Pattern/piped process checks are unreliable here; PID checks are authoritative.</p>
+  <p class="why">Why: pattern self-match and RTK lossy sampling both produce confident-but-wrong process
+  state; a wrong read here risked either a false-dead relaunch or an unwanted concurrent run.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 13:10</span> <span class="tag OFF-SPEC">OFF-SPEC</span>
+  <p>Retiring the bespoke <code>run_tier10_council.ts</code> in favor of the canonical
+  <code>~/.claude/skills/run-council4</code> skill (user directive). That skill wraps the
+  <em>same</em> <code>runModelCouncil</code> engine + same 4-member direct-vendor roster, sourcing the
+  prompt from a FILE through a bun driver. My hand-rolled runner duplicated it — a reuse-over-duplicate
+  violation. Tier 10 will now be convened via <code>run_council4.sh run --file tier10_council_prompt.txt</code>.</p>
+  <p class="why">Why: user pointed me to the tested skill; agents-council CLAUDE.md mandates "prefer a single
+  implementation." Keep the existing prompt file; only the runner changes.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 13:10</span> <span class="tag FYI">FYI</span>
+  <p><b>Corrected root-cause of the failed run (I was wrong earlier).</b> The run died on kimi/Moonshot
+  timing out (600s ×3), and I first attributed it to Moonshot degradation. Refuted: a medium kimi-k2.6
+  probe returned HTTP 200 in <b>24s</b>, and a <em>larger</em> (59.6 KB) council prompt completed on
+  2026-06-08 with the same roster. Moonshot is healthy. The real cause is <b>output length</b> — the
+  Tier 10 prompt elicits a long, detailed plan whose generation exceeds the 600s ceiling. Fix = raise
+  <code>AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS</code> (run-council4 defaults it to 300s, so it must be
+  exported). Also: Bun <code>fetch</code> self-caps ~300s regardless of AbortSignal; pilot this path with
+  <code>curl --max-time</code> like the engine does.</p>
+  <p class="why">Why: the binding constraint is the timeout vs a long generation, not the provider or the
+  runner — so the fix is more wall-clock, and the run is [VERY HIGH] cost / possibly 1–2.5h, fragile to any
+  single straggler call.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 03:25</span> <span class="tag OFF-SPEC">OFF-SPEC</span>
+  <p>Switched kimi + deepseek from <b>OpenRouter</b> to their <b>direct vendor APIs</b>
+  (per explicit user directive). Killed the in-flight OpenRouter run (task <code>beb9njbz2</code>,
+  healthy at 40 min) and relaunched (<code>blf1i5bns</code>) with
+  <code>AGENTS_COUNCIL_DIRECT_VENDOR_KEYS=1</code> defaulted in the runner. The engine then routes
+  kimi→<code>api.moonshot.ai</code> and deepseek→<code>api.deepseek.com</code>, and auto-swaps the
+  model IDs (<code>moonshotai/kimi-k2.6</code>→<code>kimi-k2.6</code>,
+  <code>deepseek/deepseek-v4-pro</code>→<code>deepseek-v4-pro</code>). claude/chatgpt local CLIs
+  unchanged.</p>
+  <p class="why">Why: user wants direct vendor routing, not OpenRouter. The engine already supports it
+  natively (<code>useDirectVendorKeys()</code>, modelCouncil.ts L2118) — only one env var + the two
+  vendor keys were needed; no model-ID surgery.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 03:25</span> <span class="tag DECISION">DECISION</span>
+  <p>Ran a per-provider micro-pilot (Hard Rule 6) before the full run: a direct <code>fetch</code> to
+  each vendor with the engine's exact request shape. Result: Moonshot <code>kimi-k2.6</code> → HTTP 200
+  (3s, "ok"); DeepSeek <code>deepseek-v4-pro</code> → HTTP 200 (1s, "ok"). Confirmed the engine's
+  hardcoded direct model IDs are valid at the direct endpoints — the one real risk in this switch.</p>
+  <p class="why">Why: direct APIs often use different model names than OpenRouter slugs (DeepSeek's are
+  usually <code>deepseek-chat</code>/<code>deepseek-reasoner</code>); a wrong ID would have killed the
+  ~40-min run at round 1. Both validated, so the full run is safe.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 02:30</span> <span class="tag DECISION">DECISION</span>
+  <p>Used the <code>runModelCouncil</code> multi-vendor engine
+  (<code>src/core/services/modelCouncil.ts</code>), not the
+  <code>summonClaudeAgent</code> lens engine (<code>run_5_agent_council.ts</code>).
+  The user said "agents-council"; <code>runModelCouncil</code> is the genuine
+  multi-member council (proposal → N deliberation rounds → ratification → one
+  repair cycle) and is the only path that gives a true 4-distinct-model roster.</p>
+  <p class="why">Why: the lens engine spawns N copies of one Claude; "4-member" implies 4 distinct model voices.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 02:30</span> <span class="tag DECISION">DECISION</span>
+  <p>Roster = <code>claude, chatgpt, kimi, deepseek</code> (Opus 4.8 + GPT-5.5 +
+  Kimi K2.6 + DeepSeek V4 Pro), user-selected "Quality" option. Only 3
+  local-CLI members exist (claude/codex/gemini), so a 4th distinct member is
+  forced to be a remote OpenRouter reasoning model; the roster uses TWO of them
+  and drops <code>gemini-3.5-flash</code>.</p>
+  <p class="why">Why: gemini-3.5-flash is a lightweight voice that dilutes a deep architecture plan; a second reasoning model is the better 4th seat.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 02:30</span> <span class="tag DECISION">DECISION</span>
+  <p>Set <code>AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS=600000</code> (default is
+  300000). Left <code>AGENTS_COUNCIL_MAX_ROUNDS</code> at its default (6) and
+  rely on the engine's self-reported-convergence early-stop.</p>
+  <p class="why">Why: prior logs show kimi/deepseek reasoning calls run ~258s, dangerously close to the 300s default ceiling; 600s gives margin. Capping rounds risks a "blocked" non-convergence on a quality run.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 02:30</span> <span class="tag DECISION">DECISION</span>
+  <p>All evidence is INLINED into the prompt: full Tier 10 plan (seed) + full
+  <code>tiers_9_to_13_proposal.md</code> (promotion grammar T10-a/b/c + ceiling
+  argument). Tier 9's full plan is deliberately EXCLUDED.</p>
+  <p class="why">Why: OpenRouter members have no file access, so evidence must be in-prompt; Tier 10's only hard dependency on Tier 9 (the randomization-premium price row) is already self-contained in the seed's §2 catalog, so the 24KB Tier 9 plan would add cost without adding required context.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 02:30</span> <span class="tag TRADEOFF">TRADEOFF</span>
+  <p>Council artifacts land in a NEW dir
+  <code>hope/ip_hope_more_tiers/tier10_council/</code>, not in the curated
+  <code>hope_program_archive/03_tiers/</code> next to the seed.</p>
+  <p class="why">Why: keeps machine-generated deliberation output out of the hand-curated program archive; the user can promote the final plan into the archive if they want it there.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-15 02:30</span> <span class="tag FYI">FYI</span>
+  <p>Cost/runtime: [HIGH]. 4 members × (1 proposal + up to 6 deliberation rounds
+  + 1 ratification [+ repair]), two of them slow reasoners run in parallel per
+  round. Estimate 20-40 min wall-clock, bounded by early-stop. The consensus
+  outcome may be <code>ratified</code>, <code>blocked</code>, or
+  <code>not_attempted</code>; a "blocked" outcome still yields the strongest
+  candidate plan plus the dissent, which is itself a useful signal.</p>
+  <p class="why">Why: the user should expect a wait and know that "blocked" is not a failure — it surfaces a real, named disagreement about the plan.</p>
+</div>
+
+</body>
+</html>

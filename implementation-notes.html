@@ -32,6 +32,81 @@
 <p class="sub">A running log of decisions not in the original ask, changes, tradeoffs, and things to know.
 Maintained across the build-out of the multi-model autonomous council. Newest section first.</p>
 
+<h2>Session 2026-06-14/15 — Kimi 2.7 swap + Tier 9 council run on direct vendor APIs</h2>
+
+<p class="sub">User asked to (1) change a council member from Kimi 2.6 → 2.7, then (2) run the 4-member council
+(claude, chatgpt, kimi, deepseek) to produce a detailed IP-HOPE Tier 9 plan, with (3) Kimi and DeepSeek on
+their <b>direct</b> vendor APIs (Moonshot / DeepSeek), <b>not</b> OpenRouter.</p>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span> Kimi seat resolved to <code>kimi-k2.6</code> — and HEAD already held it; nothing to commit</h3>
+  <div class="meta">2026-06-15 · user-approved (option: "revert default to k2.6")</div>
+  <p>Faced with the three-way choice (make 2.7 work via a <code>max_tokens</code> harness patch / revert to k2.6 / leave
+  uncommitted), the user chose <b>revert to <code>kimi-k2.6</code></b>. On executing it I found the diagnosis in the
+  handoff was off: the broken <code>kimi-k2.7-code</code> was <b>only an uncommitted working-tree edit</b>, never committed.
+  <code>HEAD</code> already carried the correct config — <code>DEFAULT_KIMI_MODEL="moonshotai/kimi-k2.6"</code>,
+  <code>DEFAULT_DIRECT_KIMI_MODEL="kimi-k2.6"</code>, <code>name:"Kimi K2.6"</code>, direct Moonshot/DeepSeek URLs,
+  <code>DEFAULT_MAX_CONSENSUS_ROUNDS=6</code>. My three string reverts simply restored the working tree to <code>HEAD</code>,
+  so <code>git diff</code> is now empty and <b>no commit is required</b>.</p>
+  <p class="why"><b>Why it matters:</b> the "default path uses broken k2.7-code" framing described the dirty working tree,
+  not the committed state. Verified post-revert (in-process, no API spend): a <code>claude,chatgpt,kimi,deepseek</code> roster
+  resolves the kimi seat to <code>moonshot/kimi-k2.6</code> and deepseek to <code>deepseek/deepseek-v4-pro</code>;
+  <code>tsc --noEmit</code> passes. Skipped a live API micro-pilot deliberately — the Tier 9 run already exercised the exact
+  Moonshot/curl/no-<code>max_tokens</code> path with k2.6, and the revert only changes where the <code>"kimi-k2.6"</code>
+  string originates, not downstream behavior.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span> Pre-existing format debt in <code>harness/run_tier5_scheduling_council.ts</code> (not mine)</h3>
+  <div class="meta">2026-06-15</div>
+  <p><code>bun run format:check</code> reports 1 error — a method-chain reflow in <code>harness/run_tier5_scheduling_council.ts</code>,
+  a committed file I never touched. Left as-is per surgical-change discipline (don't fix unrelated pre-existing debt). Flagging it
+  so a future <code>format:check</code> failure isn't mistaken for a regression from this session.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span> Plain <code>kimi-k2.7</code> does not exist; the only 2.7 (<code>kimi-k2.7-code</code>) structurally breaks this harness</h3>
+  <div class="meta">2026-06-14</div>
+  <p>Moonshot/OpenRouter expose only <code>kimi-k2.6</code> and the code/reasoning variant <code>kimi-k2.7-code</code>.
+  Running <code>k2.7-code</code> fails the council: it returns <code>finish_reason=length</code> with <b>empty content</b> —
+  its hidden reasoning exhausts the model's default output cap before any answer text, and the harness aborts after 3 retries.
+  The request body is hardcoded <code>{model, messages}</code> (<code>modelCouncil.ts:1045</code>) — <b>no <code>max_tokens</code></b>
+  is sent and there is no env knob for it, so the cap cannot be raised without a source edit.</p>
+  <p class="why"><b>Why it matters:</b> the user's literal "use 2.7" request cannot be honored as-is without a source change to inject a large <code>max_tokens</code>. Live run uses <code>k2.6</code> per the user's explicit choice.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span> Fix the 300s timeout via env, not a source edit; do not cap <code>max_tokens</code></h3>
+  <div class="meta">2026-06-15</div>
+  <p>The <code>k2.6</code> direct run died with <code>timed out after 300000ms before complete response body</code>.
+  Root cause measured by heavy direct pilots: <code>kimi-k2.6</code> on Moonshot <b>is itself a reasoning model</b>
+  (temperature must be 1; emits 30k chars of <code>reasoning_content</code>) and took <b>258s for an 84-token-input prompt</b>.
+  The real council prompt is ~100× that input with growing per-round context, so calls blow past the 300s
+  <code>curl --max-time</code>. Fix: set <code>AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS=1200000</code> (20 min) — the direct path
+  reuses this misleadingly-named knob (<code>modelCouncil.ts:1046</code>); it only controls the curl read-timeout and routes
+  nothing through OpenRouter.</p>
+  <p class="why"><b>Why this and not <code>max_tokens</code>:</b> capping output would re-trigger the <code>finish_reason=length</code> empty-content bug on these reasoning models. Raising the timeout is a client setting, not a model parameter — no Hard Rule #1 concern.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span> Uncommitted source default is still the broken <code>kimi-k2.7-code</code> (footgun)</h3>
+  <div class="meta">2026-06-15</div>
+  <p><code>modelCouncil.ts:15/17/820</code> set the Kimi defaults to <code>kimi-k2.7-code</code> / name "Kimi K2.7-code".
+  The live run only works because the env override <code>AGENTS_COUNCIL_KIMI_MODEL=kimi-k2.6</code> wins. If anyone runs
+  the council without that override, it will fail the empty-content way. <b>Nothing committed.</b> Resolve with user
+  before commit: either (a) revert source default to <code>k2.6</code>, or (b) inject a large <code>max_tokens</code> so
+  <code>k2.7-code</code> can work and the literal "use 2.7" request is honored.</p>
+  <p class="why"><b>Why flagged:</b> committing the current defaults would ship a config that breaks on the default path.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span> DeepSeek direct (<code>deepseek-v4-pro</code>) verified working — also a reasoning model, faster</h3>
+  <div class="meta">2026-06-15</div>
+  <p>Heavy direct pilot: HTTP 200, <code>finish_reason=stop</code>, 113s for the same prompt (6.3k reasoning tokens).
+  Not the bottleneck. Both vendor keys (<code>MOONSHOT_API_KEY</code>, <code>DEEPSEEK_API_KEY</code>) set and 200-verified.</p>
+  <p class="why"><b>Why flagged:</b> earlier handoff worried DeepSeek might time out like Kimi; the pilot rules that out — Kimi is the sole latency driver.</p>
+</div>
+
 <h2>Session 2026-06-09 — Behavior-preserving latency track (measure-first)</h2>
 
 <p class="sub">User asked for a <b>behavior-preserving</b> council-run speedup, explicitly distinct from the deliberation-quality redesign. Working in <code>modelCouncil.ts</code> / <code>council/summon.ts</code>.</p>
