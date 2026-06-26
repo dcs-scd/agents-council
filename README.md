@@ -241,6 +241,7 @@ These settings are optional. By default, Agents Council uses the bundled Codex C
 - `start_council`: Open a new session with a request (returns `session_id`).
 - `join_council`: Join a specific session via `session_id`.
 - `get_current_session_data`: Poll a specific `session_id` (supports cursors).
+- `wait_for_session_data`: Block on a `session_id` until new responses arrive, the session closes, or a timeout elapses — use this instead of calling `get_current_session_data` in a polling loop.
 - `send_response`: Submit feedback to a specific `session_id`.
 - `close_council`: End a specific `session_id` with a conclusion.
 - `summon_agent`: Summon Claude or Codex into the current council.

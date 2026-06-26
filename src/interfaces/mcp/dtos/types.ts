@@ -60,6 +60,12 @@ export type GetCurrentSessionDataParams = {
   cursor?: string;
 };
 
+export type WaitForSessionDataParams = {
+  session_id?: string;
+  cursor?: string;
+  timeout_seconds?: number;
+};
+
 export type JoinCouncilParams = {
   session_id?: string;
   agent_name?: string;
@@ -74,6 +80,10 @@ export type GetCurrentSessionDataResponse = {
   next_cursor: string | null;
   pending_participants: string[];
   state: CouncilStateDto;
+};
+
+export type WaitForSessionDataResponse = GetCurrentSessionDataResponse & {
+  timed_out: boolean;
 };
 
 export type CloseCouncilParams = {

@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Implementation Notes — arxiviq-trained</title>
+<style>
+  body { font: 15px/1.6 -apple-system, system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+  h1 { border-bottom: 2px solid #333; padding-bottom: .3rem; }
+  .entry { border-left: 3px solid #ccc; padding: .5rem 1rem; margin: 1rem 0; background: #fafafa; }
+  .ts { color: #666; font-size: .85em; }
+  .tag { font-weight: 700; font-size: .8em; padding: .1rem .4rem; border-radius: 3px; color: #fff; }
+  .DECISION { background: #2563eb; } .OFF-SPEC { background: #dc2626; }
+  .TRADEOFF { background: #d97706; } .FYI { background: #4b5563; }
+  .why { color: #444; font-style: italic; }
+  code { background:#eee; padding:0 .25rem; border-radius:3px; }
+</style>
+</head>
+<body>
+<h1>Implementation Notes — arxiviq-trained (corpus-fitted autonomous review skill)</h1>
+<!-- newest entry first; prepend new entries directly below this line -->
+
+<div class="entry">
+  <span class="ts">2026-06-19</span> <span class="tag DECISION">DECISION</span>
+  <p><b>HALO-X runs in the primary tree, not a worktree.</b> The build target
+     (<code>agents-council/harness/</code>, incl. the 399-review corpus and all
+     <code>arxiviq_trained/</code> artifacts) is entirely gitignored by the root
+     <code>/*</code> blanket rule — 0 tracked files. A HALO-X git worktree contains
+     only committed files, so it would be <i>empty of the corpus</i>. Using the
+     sanctioned single-run-in-primary-tree exception (<code>.halo-x/ALLOW_PRIMARY</code>).</p>
+  <p class="why">Why: worktree isolation guards against parallel runs colliding on a
+     shared tree; there is no such collision risk on a gitignored target with no other
+     active <code>arxiviq_*</code> run. The documented gitignored-tree landmine
+     (empty worktree) makes the exception the correct, not lazy, choice.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-19</span> <span class="tag DECISION">DECISION</span>
+  <p><b>"Autonomous" (option ii) = in-session Opus 4.8 generation with the critic
+     loop replacing the human eye; held-out eval defaults to in-session over ~12
+     papers.</b> Reconciles "use you to generate" with "no human in the loop": the
+     pipeline runs ingest→retrieve→draft→critic→render without stopping to ask the
+     user, and the critic + gate stand in for the reviewer. No Anthropic API key or
+     batch spend required. A batch-20 API blind eval (<code>claude-opus-4-8</code>)
+     is a flagged upgrade, explicitly out of scope now.</p>
+  <p class="why">Why: a true headless API service would be a bigger build and needs a
+     key + budget the user hasn't provisioned; the in-session reading delivers the same
+     autonomous product for the user's stated usage and unblocks immediately.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-19</span> <span class="tag DECISION">DECISION</span>
+  <p><b>"Trained skill" = corpus-fitted prompt program, not weight training.</b>
+     Opus 4.8 is not fine-tunable by the user. The trainable surface is the skill's
+     <i>data</i>: a mined style-card (measured thresholds), a retrieval index of the
+     392 paired reviews injected as few-shot exemplars, and a critic rubric. These
+     are fit to the 399 and validated against held-out members of it (eval-driven
+     prompt-program optimization).</p>
+  <p class="why">Why: sets the right expectation — the deliverable is portable data
+     loaded into a stateless engine at run time, which is exactly the user's usage
+     model ("give you a paper + the trained skill").</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-06-19</span> <span class="tag FYI">FYI</span>
+  <p><b>The current skill is provably un-fitted — evidence that motivated the build.</b>
+     Measured corpus visible-word distribution: median <b>1,439</b> (p25 1,323,
+     p75 1,574). The skill's own spec says <b>2,000–3,000 words, floor 1,500</b> —
+     ~40% over the real median, and visible-word counts overcount prose so the true
+     gap is larger. The single most measurable parameter is mis-set because
+     <code>voice.md</code> was hand-estimated. WU-MINE replaces it with mined numbers.</p>
+  <p class="why">Why: documents the concrete defect the build fixes, and the
+     length-IQR invariant (≈1,320–1,575) that supersedes the legacy target.</p>
+</div>
+
+</body>
+</html>

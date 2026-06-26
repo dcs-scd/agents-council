@@ -42,13 +42,17 @@ import type {
   SummonAgentResponse,
   StartCouncilParams,
   StartCouncilResponse,
+  WaitForSessionDataParams,
+  WaitForSessionDataResponse,
 } from "./dtos/types";
+import { waitForNewSessionData } from "./sessionDataWait";
 
 type ResponseFormat = "markdown" | "json";
 type ToolName =
   | "start_council"
   | "join_council"
   | "get_current_session_data"
+  | "wait_for_session_data"
   | "close_council"
   | "send_response"
   | "summon_agent"
@@ -58,10 +62,15 @@ type ToolContext = {
   sessionId?: string;
 };
 
+const DEFAULT_WAIT_TIMEOUT_SECONDS = 120;
+const MAX_WAIT_TIMEOUT_SECONDS = 600;
+const WAIT_POLL_INTERVAL_MS = 2_000;
+
 const serverInstructions = [
   "If you need feedback from other AI agents, start a council with start_council.",
   "If you are requested to join the council, call join_council with session_id, read the request, and send_response with the same session_id as soon as possible.",
-  "Use get_current_session_data with session_id to poll for new responses; pass the cursor returned to fetch only newer messages.",
+  "Use get_current_session_data with session_id to fetch responses since a cursor; pass the cursor returned to fetch only newer messages.",
+  "Prefer wait_for_session_data with session_id (and your last cursor) to block until new responses arrive instead of calling get_current_session_data in a polling loop.",
   "Use close_council with session_id to end that session with a conclusion.",
   "Use run_model_council when the user wants Opus 4.8 and GPT-5.5 (xhigh reasoning) to deliberate and reach peer-ratified consensus without a chair. Set AGENTS_COUNCIL_MEMBERS to widen the roster (e.g. add Kimi, DeepSeek, Gemini).",
 ].join("\n");
@@ -144,6 +153,14 @@ function registerTools(options: {
     .object({
       session_id: sessionIdSchema,
       cursor: z.string().min(1).optional(),
+    })
+    .strict();
+
+  const waitForSessionDataSchema: z.ZodTypeAny = z
+    .object({
+      session_id: sessionIdSchema,
+      cursor: z.string().min(1).optional(),
+      timeout_seconds: z.number().int().positive().max(MAX_WAIT_TIMEOUT_SECONDS).optional(),
     })
     .strict();
 
@@ -255,6 +272,59 @@ function registerTools(options: {
         );
         const response = mapGetCurrentSessionDataResponse(result);
         return toolOk("get_current_session_data", response, {
+          sessionId,
+          cursor: params.cursor,
+        });
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  );
+
+  registerTool<WaitForSessionDataParams>(
+    "wait_for_session_data",
+    {
+      description:
+        "Block until new responses arrive for a session_id, the session closes, or the timeout elapses, then return like get_current_session_data. Pass the cursor from your last get_current_session_data so it waits for strictly newer messages. Prefer this over calling get_current_session_data in a polling loop.",
+      inputSchema: waitForSessionDataSchema,
+    },
+    async (params) => {
+      try {
+        const sessionId = params.session_id?.trim();
+        if (!sessionId) {
+          throw new Error("session_id is required for wait_for_session_data.");
+        }
+        const resolvedName = agentName;
+        if (!resolvedName) {
+          throw new Error(
+            "wait_for_session_data needs a stored agent name. Call join_council (or start_council) once, then retry.",
+          );
+        }
+        const timeoutSeconds = params.timeout_seconds ?? DEFAULT_WAIT_TIMEOUT_SECONDS;
+        const outcome = await waitForNewSessionData(
+          async () => {
+            const result = await service.getSessionData(
+              mapGetSessionDataInput({
+                session_id: sessionId,
+                cursor: params.cursor,
+                agent_name: resolvedName,
+              }),
+            );
+            const mapped = mapGetCurrentSessionDataResponse(result);
+            const sessionClosed = mapped.state.session?.status === "closed";
+            return { value: mapped, ready: mapped.feedback.length > 0 || sessionClosed };
+          },
+          {
+            now: () => Date.now(),
+            sleep: (durationMs) =>
+              new Promise<void>((resolve) => {
+                setTimeout(resolve, durationMs);
+              }),
+          },
+          { timeoutMs: timeoutSeconds * 1_000, pollIntervalMs: WAIT_POLL_INTERVAL_MS },
+        );
+        const response: WaitForSessionDataResponse = { ...outcome.value, timed_out: outcome.timedOut };
+        return toolOk("wait_for_session_data", response, {
           sessionId,
           cursor: params.cursor,
         });
@@ -487,6 +557,8 @@ function formatToolText(toolName: ToolName, payload: unknown, context: ToolConte
       return formatStartCouncil(payload as StartCouncilResponse);
     case "get_current_session_data":
       return formatGetCurrentSessionData(payload as GetCurrentSessionDataResponse, context);
+    case "wait_for_session_data":
+      return formatWaitForSessionData(payload as WaitForSessionDataResponse, context);
     case "join_council":
       return formatJoinCouncil(payload as GetCurrentSessionDataResponse);
     case "close_council":
@@ -571,6 +643,18 @@ function formatGetCurrentSessionData(response: GetCurrentSessionDataResponse, co
   lines.push("No further replies are heard for now. Return anon for more.");
   lines.push(`To hear only new replies, use the cursor: ${cursorToken}`);
   return lines.join("\n");
+}
+
+function formatWaitForSessionData(response: WaitForSessionDataResponse, context: ToolContext): string {
+  const body = formatGetCurrentSessionData(response, context);
+  if (response.timed_out) {
+    return [
+      "No new replies arrived before the wait timed out. Call wait_for_session_data again to keep waiting.",
+      "",
+      body,
+    ].join("\n");
+  }
+  return body;
 }
 
 function formatCloseCouncil(response: CloseCouncilResponse): string {
