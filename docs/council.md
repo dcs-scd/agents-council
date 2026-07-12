@@ -478,6 +478,14 @@ entries by `[id]`; the `SOURCE_ID_MISMATCH` check above validates `repo_fact` ci
 these ids. This is **plumbing only** — evidence-pack generation is out of scope. When no pack is
 supplied the proposal prompts are **byte-identical to legacy**.
 
+**Evidence pack in ratification prompts (Lane A / A5).** The pack is also included in each
+**ratification** prompt (previously it appeared only in round-0 proposals), so a ratifier can run
+its `FACTUAL_ERROR` / `SOURCE_ID_MISMATCH` check against evidence it can actually see. The
+inclusion is deterministic by size: the **full** citable pack when the rendered block is **≤ 8000
+characters**, otherwise a **compact index** of claim ids + source names only (full text omitted) so
+a large pack cannot blow up every ratifier's prompt. When no pack is supplied the ratification
+prompt is unchanged.
+
 ### Odd-roster default
 
 The flag-off default roster is now an **odd, heterogeneous** panel:
@@ -525,12 +533,64 @@ changes nothing about the council's outcome (controller-isolation proven structu
 value). The only live convergence controller remains the F3 self-reported `CONSENSUS_STATUS`
 (with draft-overlap fallback).
 
-### Top-level outcome enum is frozen
+### Top-level outcome enum (contract change — `ratified_with_edits` added)
 
-The top-level consensus outcome enum stays **frozen** at
-`not_attempted | ratified | blocked`. The minority report is an **additional field**, not a new
-outcome. `qualified_consensus` is **deferred and nested-only** — it is not added to the
-top-level enum.
+The consensus outcome enum is `not_attempted | ratified | ratified_with_edits | blocked`.
+
+`ratified_with_edits` is a **deliberate, documented contract change** (Lane A / A1): the enum
+was previously frozen at three states, and `qualified_consensus` was deferred as nested-only.
+The Wave-B minority report remains an **additional field**, not an outcome.
+
+**When it fires.** After the single repair cycle's re-ratification — or after the first
+ratification when repair was skipped — the decisive ratifications are classified:
+
+- any absolute veto (`FACTUAL_ERROR` / `MATERIAL_DISAGREEMENT`) → `blocked` (unchanged);
+- any plain `BLOCK` (`INSUFFICIENT_EVIDENCE` / `SYNTHESIS_ERROR` / `PROTOCOL` / bare) → `blocked` (unchanged);
+- every member `ACCEPT` → `ratified` (unchanged);
+- otherwise (≥ 1 `ACCEPT_WITH_EDITS`, the rest `ACCEPT`, no `BLOCK`) → **`ratified_with_edits`**.
+
+**Engine-native fold.** For the `ratified_with_edits` case the chair (`members[0]`) is given the
+ratified candidate plus every member's `REQUIRED_EDITS` and produces one folded final consensus.
+That folded artifact is **not re-ratified** — re-ratifying a fold is the loop this replaces (10 of
+13 historical `blocked` outcomes were in fact `ACCEPT_WITH_EDITS`-only slates whose re-ratification
+never converged). The fold is recorded on the result as `fold { synthesizedBy, foldedEdits[] }`. If
+the fold call itself fails, the outcome **stays `ratified_with_edits`** with the unfolded candidate
+and a `fold.foldError` note — it never downgrades to `blocked`.
+
+**Result fields.** `consensus.acceptedWithEditsBy[]` lists the `ACCEPT_WITH_EDITS` voters; they are
+**never** placed in `consensus.blockedBy` (which now carries only actual `BLOCK` voters), so an
+`ACCEPT_WITH_EDITS` voter is not misclassified as a blocker on any outcome. `ratified_with_edits`
+exits **0** (a non-error completion, like `ratified` / `not_attempted`); only `blocked` exits non-zero.
+`formatModelCouncilMarkdown` renders the outcome as "Council Consensus (Ratified with Edits)" with a
+`## Folded Edits` section.
+
+### Quorum guard (single-member councils) — `AGENTS_COUNCIL_ALLOW_SOLO`
+
+At roster resolution a council of fewer than two members **throws** — a lone voter always ratifies
+its own draft, which is not consensus. Set `AGENTS_COUNCIL_ALLOW_SOLO=1` to run a solo council
+anyway; the run then emits a loud stderr warning and the result carries `solo: true`, so a
+one-member council is never a silent plain `ratified`.
+
+### Anonymized peers in mid-run prompts
+
+Deliberation and ratification prompts refer to peer drafts by **stable anonymous labels**
+(`Member A`, `Member B`, … in roster order) rather than `## <name> (<model>)`, to suppress
+prestige bias — a member judges a draft on its merits, not on who wrote it. This is the new
+default (no flag). Saved transcripts (JSON / Markdown) keep **real identities** and record the
+label ↔ member map (`result.peerLabels`, and a `## Peer Labels` section in the Markdown).
+
+### Candidate nomination (markerless exclusion + PREFERRED_DRAFT approval)
+
+A deliberation reply with no `CANDIDATE_CONSENSUS:` marker is **not** treated as a candidate draft:
+the member is re-asked once to resend in protocol format, and if it is still markerless it
+contributes no draft that round (recorded `protocolNoncompliant` on the proposal). The
+round's shared candidate is nominated by **PREFERRED_DRAFT approval voting** — members emit
+`PREFERRED_DRAFT: <Member label | SELF>` and the most-approved draft wins (ties broken by roster
+order). If no member emitted a parseable `PREFERRED_DRAFT`, the engine falls back to the previous
+longest-draft rule; the chosen method is recorded on the round as `nominationMethod`
+(`unanimous | approval | longest_fallback | none`). The structured (`AGENTS_COUNCIL_STRUCTURED`)
+path is exempt from the markerless re-ask, since there the candidate rides a JSON payload rather
+than the text marker.
 
 ### New environment variables
 
@@ -543,6 +603,7 @@ top-level enum.
 | `AGENTS_COUNCIL_DROP_OVERSIZED` | When `1`/`true`, a member whose round-0 brief is estimated over its context budget is dropped **pre-spend** (recorded as a drop) instead of only warned about. Advisory-only by default. |
 | `AGENTS_COUNCIL_CONTEXT_TOKENS_<ID>` | Per-member context budget (tokens) for the brief-size precheck, where `<ID>` is the uppercased member id (e.g. `AGENTS_COUNCIL_CONTEXT_TOKENS_KIMI`). Falls back to a deliberately conservative built-in default per member. |
 | `AGENTS_COUNCIL_PERF_LOG` | When set, emits a per-call `PERF …` line to stderr. Subsumed by the always-recorded cost/latency ledger (below); the flag still controls the stderr echo. |
+| `AGENTS_COUNCIL_ALLOW_SOLO` | Opt-in (default OFF) to run a sub-quorum single-member council (Lane A / A2). Off, a roster of fewer than two members throws at resolution. On (`1`/`true`/`yes`), the run proceeds with a loud stderr warning and the result is flagged `solo: true`. |
 
 ### Graduation gate (Wave C)
 

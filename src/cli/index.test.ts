@@ -72,6 +72,9 @@ function mockEnv(url: string, delibDir: string): Record<string, string> {
     AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS: "5000",
     AGENTS_COUNCIL_STRUCTURED: "",
     AGENTS_COUNCIL_DELIBERATIONS_DIR: delibDir,
+    // These runs use a deliberate 1-member (kimi) roster to hit the mock; the A2
+    // quorum guard would otherwise reject any sub-2 roster at resolution.
+    AGENTS_COUNCIL_ALLOW_SOLO: "1",
   };
 }
 

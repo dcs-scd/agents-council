@@ -183,11 +183,15 @@ describe("model council prompt protocol", () => {
     const previousKey = process.env.OPENROUTER_API_KEY;
     const previousUrl = process.env.AGENTS_COUNCIL_OPENROUTER_URL;
     const previousTimeout = process.env.AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS;
+    // A2: a single-member roster now requires the solo-quorum opt-in, or the run
+    // throws at roster resolution before it ever reaches the network timeout path.
+    const previousAllowSolo = process.env.AGENTS_COUNCIL_ALLOW_SOLO;
 
     process.env.AGENTS_COUNCIL_MEMBERS = "kimi";
     process.env.OPENROUTER_API_KEY = "test-key";
     process.env.AGENTS_COUNCIL_OPENROUTER_URL = server.url.toString();
     process.env.AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS = "50";
+    process.env.AGENTS_COUNCIL_ALLOW_SOLO = "1";
 
     try {
       expect(resolveOpenRouterTimeoutMs()).toBe(50);
@@ -198,6 +202,7 @@ describe("model council prompt protocol", () => {
       restoreEnv("OPENROUTER_API_KEY", previousKey);
       restoreEnv("AGENTS_COUNCIL_OPENROUTER_URL", previousUrl);
       restoreEnv("AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS", previousTimeout);
+      restoreEnv("AGENTS_COUNCIL_ALLOW_SOLO", previousAllowSolo);
     }
   });
 
@@ -217,11 +222,14 @@ describe("model council prompt protocol", () => {
     const previousKey = process.env.OPENROUTER_API_KEY;
     const previousUrl = process.env.AGENTS_COUNCIL_OPENROUTER_URL;
     const previousTimeout = process.env.AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS;
+    // A2: single-member roster needs the solo-quorum opt-in (see the sibling timeout test).
+    const previousAllowSolo = process.env.AGENTS_COUNCIL_ALLOW_SOLO;
 
     process.env.AGENTS_COUNCIL_MEMBERS = "kimi";
     process.env.OPENROUTER_API_KEY = "test-key";
     process.env.AGENTS_COUNCIL_OPENROUTER_URL = server.url.toString();
     process.env.AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS = "50";
+    process.env.AGENTS_COUNCIL_ALLOW_SOLO = "1";
 
     try {
       await expect(runModelCouncil({ prompt: "body timeout smoke" })).rejects.toThrow(/complete response body/);
@@ -231,6 +239,7 @@ describe("model council prompt protocol", () => {
       restoreEnv("OPENROUTER_API_KEY", previousKey);
       restoreEnv("AGENTS_COUNCIL_OPENROUTER_URL", previousUrl);
       restoreEnv("AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS", previousTimeout);
+      restoreEnv("AGENTS_COUNCIL_ALLOW_SOLO", previousAllowSolo);
     }
   });
 
@@ -446,11 +455,14 @@ describe("model council consensus repair", () => {
     const previousKey = process.env.OPENROUTER_API_KEY;
     const previousUrl = process.env.AGENTS_COUNCIL_OPENROUTER_URL;
     const previousTimeout = process.env.AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS;
+    // A2: single-member roster needs the solo-quorum opt-in to reach the repair path.
+    const previousAllowSolo = process.env.AGENTS_COUNCIL_ALLOW_SOLO;
 
     process.env.AGENTS_COUNCIL_MEMBERS = "kimi";
     process.env.OPENROUTER_API_KEY = "test-key";
     process.env.AGENTS_COUNCIL_OPENROUTER_URL = server.url.toString();
     process.env.AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS = "5000";
+    process.env.AGENTS_COUNCIL_ALLOW_SOLO = "1";
 
     try {
       const result = await runModelCouncil({ prompt: "Review the tiers" });
@@ -470,6 +482,7 @@ describe("model council consensus repair", () => {
       restoreEnv("OPENROUTER_API_KEY", previousKey);
       restoreEnv("AGENTS_COUNCIL_OPENROUTER_URL", previousUrl);
       restoreEnv("AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS", previousTimeout);
+      restoreEnv("AGENTS_COUNCIL_ALLOW_SOLO", previousAllowSolo);
     }
   });
 });
@@ -568,9 +581,11 @@ describe("absolute veto closes the false-accept axis (F7)", () => {
     expect(shouldAttemptRepair([accept, materialDisagreement])).toBe(false);
   });
 
-  test("an absolute veto overrides an ACCEPT_WITH_EDITS that would otherwise repair", () => {
-    // ACCEPT_WITH_EDITS alone is repairable; pairing it with a FACTUAL_ERROR must not be.
-    expect(shouldAttemptRepair([acceptWithEdits])).toBe(true);
+  test("an ACCEPT_WITH_EDITS-only slate is folded (A1), not sent through the repair cycle", () => {
+    // A1 semantics: an ACCEPT_WITH_EDITS-only slate reached substantive consensus and
+    // is folded terminally (ratified_with_edits) rather than re-ratified — so it no
+    // longer triggers the repair cycle. Pairing it with a FACTUAL_ERROR still blocks.
+    expect(shouldAttemptRepair([acceptWithEdits])).toBe(false);
     expect(shouldAttemptRepair([acceptWithEdits, factualError])).toBe(false);
   });
 

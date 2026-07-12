@@ -26,6 +26,9 @@ const DEFAULT_CHATGPT_MODEL = "gpt-5.5";
 const DEFAULT_CHATGPT_REASONING_EFFORT = "xhigh" as const;
 const DEFAULT_CLAUDE_MODEL = "claude-opus-4-8";
 const MEMBERS_ENV = "AGENTS_COUNCIL_MEMBERS";
+// A2: opt-in to run a sub-quorum (single-member) council. Off by default so a
+// council of one throws at roster resolution instead of silently self-ratifying.
+const ALLOW_SOLO_ENV = "AGENTS_COUNCIL_ALLOW_SOLO";
 // Default council roster when AGENTS_COUNCIL_MEMBERS is unset: an odd,
 // heterogeneous, three-member panel — Opus 4.8 (Claude), GPT-5.5 at xhigh
 // reasoning (ChatGPT/Codex), and Gemini 3.5 Flash. All three resolve through
@@ -113,6 +116,22 @@ export type ModelCouncilResponse = {
 
 export type ModelCouncilCandidateProposal = ModelCouncilResponse & {
   candidateConsensus: string;
+  // A4: set when the member's reply — and its single "resend in protocol format"
+  // re-ask — omitted the required CANDIDATE_CONSENSUS marker, so it contributed no
+  // draft this round. Such a proposal is excluded from candidate nomination.
+  protocolNoncompliant?: boolean;
+};
+
+// A4: how a round's shared candidate was nominated.
+//   "unanimous"        — every member's draft was byte-identical.
+//   "approval"         — chosen by PREFERRED_DRAFT approval voting.
+//   "longest_fallback" — no parseable PREFERRED_DRAFT, so the longest draft won.
+//   "none"             — no member contributed a draft this round.
+export type CandidateNominationMethod = "unanimous" | "approval" | "longest_fallback" | "none";
+
+export type CandidateNomination = {
+  candidate: string;
+  method: CandidateNominationMethod;
 };
 
 export type ModelCouncilRound = {
@@ -128,6 +147,10 @@ export type ModelCouncilRound = {
   // isConverged now keys on the members' self-reported CONSENSUS_STATUS, falling
   // back to a draft overlap coefficient. Kept for the rendered Convergence table.
   memberAgreement: number;
+  // A4: how this round's shared candidate was nominated — records whether approval
+  // voting decided it or the longest-draft fallback fired. Optional so transcripts
+  // written before A4 (and hand-built test fixtures) stay valid.
+  nominationMethod?: CandidateNominationMethod;
 };
 
 // A member's ratification verdict is ternary, not binary. ACCEPT_WITH_EDITS lets
@@ -163,22 +186,30 @@ export type ModelCouncilRatification = ModelCouncilResponse & {
   vote: RatificationVote;
 };
 
-// Three-state outcome of the ratify phase:
-//   "ratified"      — every member voted ACCEPT; consensus reached.
-//   "blocked"       — ratify ran and at least one member voted REJECT.
-//   "not_attempted" — convergence was never detected, so ratify never ran.
+// Four-state outcome of the ratify phase:
+//   "ratified"             — every member voted ACCEPT; consensus reached.
+//   "ratified_with_edits"  — no BLOCK/veto, but >= 1 member voted ACCEPT_WITH_EDITS
+//                            (A1): the chair folded every required edit into the
+//                            final consensus once (engine-native fold). Consensus
+//                            reached; the folded artifact was NOT re-ratified.
+//   "blocked"              — ratify ran and at least one member voted BLOCK/veto.
+//   "not_attempted"        — convergence was never detected, so ratify never ran.
 // The previous shape (boolean `reached` + `blockedBy: string[]`) overloaded
 // `blockedBy` to mean both "voted REJECT" (converged path) and "never voted"
 // (non-converged path), which silently lied to callers about why consensus
-// failed. With this field the two cases are distinguishable.
-export type ModelCouncilConsensusOutcome = "ratified" | "blocked" | "not_attempted";
+// failed. With this field the two cases are distinguishable. `ratified_with_edits`
+// is a deliberate, documented contract change (A1): the previously-frozen enum
+// grows so ACCEPT_WITH_EDITS-only slates ratify with folded edits instead of the
+// old misclassification as `blocked`.
+export type ModelCouncilConsensusOutcome = "ratified" | "ratified_with_edits" | "blocked" | "not_attempted";
 
 // The process exit-code contract for a finished council run (WU-B4). A `blocked`
 // outcome is a hard stop — an absolute veto or an unresolved claim-ledger
-// precondition — so the caller must see a non-zero exit; `ratified` and
-// `not_attempted` are non-error completions. Extracted as a pure function so the
-// veto -> non-zero-exit invariant is unit-testable without spawning the CLI (the
-// `solve` action sets `process.exitCode` from this).
+// precondition — so the caller must see a non-zero exit; `ratified`,
+// `ratified_with_edits` (A1), and `not_attempted` are non-error completions.
+// Extracted as a pure function so the veto -> non-zero-exit invariant is
+// unit-testable without spawning the CLI (the `solve` action sets
+// `process.exitCode` from this).
 export function councilOutcomeExitCode(outcome: ModelCouncilConsensusOutcome): number {
   return outcome === "blocked" ? 1 : 0;
 }
@@ -205,6 +236,11 @@ export type ModelCouncilConsensus = {
   reached: boolean;
   outcome: ModelCouncilConsensusOutcome;
   ratifiedBy: string[];
+  // A1: members who accepted the substance but required edits (ACCEPT_WITH_EDITS).
+  // Populated on `ratified_with_edits`, and on a `blocked` outcome that also had
+  // AWE voters, so an ACCEPT_WITH_EDITS voter is NEVER misclassified as a blocker.
+  // Absent on a clean `ratified` (no AWE voters) and on `not_attempted`.
+  acceptedWithEditsBy?: string[];
   blockedBy: string[];
   // Optional human-facing reason for non-ratification. Machines key off `outcome`.
   notRatifiedReason?: string;
@@ -230,6 +266,31 @@ export type ModelCouncilRepair = {
   synthesizedBy: MemberRef;
 };
 
+// A1: the engine-native fold. Present only on a `ratified_with_edits` outcome —
+// the chair (`members[0]`) folded every ACCEPT_WITH_EDITS voter's required edits
+// into a single final consensus, which then becomes `candidateConsensus`. The
+// folded artifact is NEVER re-ratified (re-ratifying the fold is the loop this
+// replaces). On a fold-call failure the pre-fold candidate is kept and `foldError`
+// records the reason — the outcome stays `ratified_with_edits`, never `blocked`.
+export type ModelCouncilFoldedEdit = {
+  member: MemberRef;
+  requiredEdits: string;
+};
+
+export type ModelCouncilFold = {
+  synthesizedBy: MemberRef;
+  foldedEdits: ModelCouncilFoldedEdit[];
+  foldError?: string;
+};
+
+// A3: the stable anonymous-label -> real-member mapping used in mid-run prompts.
+// Prompts show peers as "Member A", "Member B", … (roster order) to suppress
+// prestige bias; the saved transcript keeps real identities and records this map.
+export type PeerLabel = {
+  label: string;
+  member: MemberRef;
+};
+
 export type ModelCouncilResult = {
   prompt: string;
   members: ModelCouncilMember[];
@@ -243,6 +304,8 @@ export type ModelCouncilResult = {
   // cycle ran. `candidateConsensus` and `ratifications` above are then the
   // post-repair (decisive) values.
   repair?: ModelCouncilRepair;
+  // Present only on a `ratified_with_edits` outcome (A1). See ModelCouncilFold.
+  fold?: ModelCouncilFold;
   consensus: ModelCouncilConsensus;
   // WU-B3: true when at least one member was dropped mid-run and the council
   // continued over the survivors. Absent/false on a full-roster run.
@@ -257,6 +320,11 @@ export type ModelCouncilResult = {
   // WU-B4: aggregate totals across `ledger`. Pure observation — no control flow
   // reads either field.
   ledgerTotals?: CouncilLedgerTotals;
+  // A2: true when the council ran with a single member under a waived quorum
+  // (AGENTS_COUNCIL_ALLOW_SOLO). A solo council is never a silent plain `ratified`.
+  solo?: boolean;
+  // A3: the anonymous-label -> member map used in mid-run prompts (roster order).
+  peerLabels?: PeerLabel[];
 };
 
 // WU-B3: the record of one member dropped terminally mid-run. `round` is null for
@@ -437,7 +505,19 @@ function extractOpenRouterText(choice: OpenRouterChoice | undefined): string | n
 export async function runModelCouncil(input: RunModelCouncilInput): Promise<ModelCouncilResult> {
   const prompt = normalizeRequiredString(input.prompt, "prompt");
   const members = buildDefaultMembers();
+  // A2: quorum guard at roster resolution. A council of one is a degenerate case
+  // (a single voter always "ratifies" itself), so a sub-quorum roster throws unless
+  // the operator opts in via AGENTS_COUNCIL_ALLOW_SOLO — in which case the run is
+  // loudly flagged `solo: true` and never serializes as a silent plain `ratified`.
+  const solo = enforceQuorum(members);
   validateCouncilConfig(members);
+  // A3: assign each member a stable anonymous label (Member A, Member B, … in
+  // roster order). Mid-run prompts show peers by label to suppress prestige bias;
+  // this map records label -> real identity for the saved transcript.
+  const peerLabels: PeerLabel[] = members.map((member, index) => ({
+    label: peerLabel(index),
+    member: toMemberRef(member),
+  }));
 
   // WU-B2/B3/B4: a per-run accumulator carries the shrinking survivor roster, the
   // drop ledger, the cost/latency ledger, and the crash-insurance checkpoint path.
@@ -465,24 +545,25 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
   const maxRounds = resolveMaxRounds();
 
   for (let index = 1; index <= maxRounds; index++) {
-    const roundContent = await runMemberPhase(state, "deliberation", index, (member) =>
-      askMember(
-        member,
-        buildDeliberationMessages(prompt, responses, previousProposals, candidateConsensus, member, index),
-        state,
-        "deliberation",
-        index,
-      ),
+    // WU-B3 x A4: the deliberation phase runs over the surviving roster with the
+    // drop/checkpoint machinery, while each member's ask goes through the A4
+    // re-ask-once wrapper (markerless reply -> one protocol resend -> noncompliant).
+    const roundProposals = await runMemberPhase(
+      state,
+      "deliberation",
+      index,
+      (member) =>
+        askDeliberation(
+          member,
+          buildDeliberationMessages(prompt, responses, previousProposals, candidateConsensus, member, index),
+          state,
+          index,
+        ),
+      (proposal) => ({ content: proposal.content }),
     );
-    const proposals: ModelCouncilCandidateProposal[] = state.active.map((member) => {
-      const content = roundContent.get(member)!;
-      return {
-        member: toMemberRef(member),
-        content,
-        candidateConsensus: parseCandidateConsensus(content),
-      };
-    });
-    const nextCandidateConsensus = buildCandidateConsensus(proposals);
+    const proposals: ModelCouncilCandidateProposal[] = state.active.map((member) => roundProposals.get(member)!);
+    const nomination = nominateCandidateConsensus(proposals);
+    const nextCandidateConsensus = nomination.candidate;
     const changed = candidateChanged(candidateConsensus, nextCandidateConsensus);
     const similarityToPrevious = index === 1 ? null : tokenSimilarity(candidateConsensus, nextCandidateConsensus);
     const memberAgreement = averagePairwiseSimilarity(
@@ -495,6 +576,7 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
       changed,
       similarityToPrevious,
       memberAgreement,
+      nominationMethod: nomination.method,
     };
     rounds.push(round);
     candidateConsensus = nextCandidateConsensus;
@@ -515,7 +597,9 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
   // ratification entirely and recorded `not_attempted` even when the members in
   // fact agreed. The members' own ACCEPT/BLOCK votes are the real consensus test.
   const hasCandidate = candidateConsensus.trim().length > 0;
-  let ratifications = hasCandidate ? await ratifyCandidate(state, prompt, rounds, candidateConsensus) : [];
+  let ratifications = hasCandidate
+    ? await ratifyCandidate(state, prompt, rounds, candidateConsensus, input.evidencePack)
+    : [];
 
   // WU-B2: claim-ledger ratification preconditions. Under AGENTS_COUNCIL_STRUCTURED
   // only (INV-2), inspect the structured claims the members emitted and prepend an
@@ -548,23 +632,66 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
     // WU-B3: chair duties follow the surviving roster — the first survivor, not
     // necessarily the original members[0], synthesizes the repair.
     const synthesizer = state.active[0]!;
-    const revisedCandidate = parseCandidateConsensus(
-      await askMember(
-        synthesizer,
-        buildSynthesisMessages(prompt, candidateConsensus, ratifications, synthesizer),
-        state,
-        "synthesis",
-        null,
-      ),
-    );
+    const revisedCandidate =
+      parseCandidateConsensus(
+        await askMember(
+          synthesizer,
+          buildSynthesisMessages(prompt, candidateConsensus, ratifications, synthesizer),
+          state,
+          "synthesis",
+          null,
+        ),
+      ) ?? "";
     if (revisedCandidate.length > 0 && candidateChanged(candidateConsensus, revisedCandidate)) {
       repair = {
         priorRatifications: ratifications,
         revisedCandidate,
         synthesizedBy: toMemberRef(synthesizer),
       };
-      ratifications = await ratifyCandidate(state, prompt, rounds, revisedCandidate);
+      ratifications = await ratifyCandidate(state, prompt, rounds, revisedCandidate, input.evidencePack);
       candidateConsensus = revisedCandidate;
+    }
+  }
+
+  // A1: engine-native fold. When the decisive ratifications carry no BLOCK/veto but
+  // >= 1 ACCEPT_WITH_EDITS, the members agree on substance and differ only on edits.
+  // The chair folds every required edit into the final consensus ONCE — the folded
+  // text is NOT re-ratified (re-ratifying the fold is exactly the loop this replaces,
+  // and the empirical driver: 10/13 historical `blocked` outcomes were AWE-only). A
+  // fold-call failure keeps the unfolded candidate and records foldError; it never
+  // downgrades to `blocked`. This runs on whatever ratifications are decisive — the
+  // post-repair slate if repair ran, otherwise the first-round slate (repair skipped).
+  // WU-B3: the fold chair follows the surviving roster, like repair synthesis.
+  let fold: ModelCouncilFold | undefined;
+  if (isRatifiedWithEdits(ratifications)) {
+    const chair = state.active[0]!;
+    const foldedEdits: ModelCouncilFoldedEdit[] = ratifications
+      .filter((ratification) => ratification.vote.decision === "accept_with_edits")
+      .map((ratification) => ({
+        member: ratification.member,
+        requiredEdits: ratification.vote.requiredEdits ?? ratification.content,
+      }));
+    try {
+      const foldedText =
+        parseCandidateConsensus(
+          await askMember(
+            chair,
+            buildSynthesisMessages(prompt, candidateConsensus, ratifications, chair),
+            state,
+            "fold",
+            null,
+          ),
+        ) ?? "";
+      if (foldedText.length > 0) {
+        candidateConsensus = foldedText;
+      }
+      fold = { synthesizedBy: toMemberRef(chair), foldedEdits };
+    } catch (error) {
+      fold = {
+        synthesizedBy: toMemberRef(chair),
+        foldedEdits,
+        foldError: error instanceof Error ? error.message : String(error),
+      };
     }
   }
 
@@ -578,11 +705,14 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
     converged,
     ratifications,
     repair,
+    fold,
     consensus: buildConsensusResult(ratifications, state.active),
     degraded: state.dropped.length > 0,
     droppedMembers: state.dropped,
     ledger: state.ledger,
     ledgerTotals: aggregateLedger(state.ledger),
+    ...(solo ? { solo: true } : {}),
+    peerLabels,
   };
   // WU-B2: the run completed — the checkpoint's crash insurance is no longer
   // needed, so remove it. (A thrown failure above leaves it in place for the
@@ -599,6 +729,7 @@ async function ratifyCandidate(
   prompt: string,
   rounds: ModelCouncilRound[],
   candidateConsensus: string,
+  evidencePack: EvidencePackEntry[] | undefined,
 ): Promise<ModelCouncilRatification[]> {
   // WU-B3: unanimity is over survivors only — a member that fails to vote is
   // dropped, and the run fails only if fewer than two survive. Each survivor's
@@ -610,7 +741,7 @@ async function ratifyCandidate(
     async (member) => {
       const content = await askMember(
         member,
-        buildRatificationMessages(prompt, rounds, candidateConsensus, member),
+        buildRatificationMessages(prompt, rounds, candidateConsensus, member, evidencePack),
         state,
         "ratification",
         null,
@@ -864,6 +995,54 @@ async function briefSizePrecheck(state: CouncilRunState, evidencePack: EvidenceP
   }
 }
 
+// A4: run one member's deliberation turn, enforcing the protocol-format contract.
+// A reply that omits the required CANDIDATE_CONSENSUS marker is NOT a candidate
+// draft — the member is re-asked ONCE to resend in protocol format; if it is still
+// markerless it contributes no draft this round (recorded protocolNoncompliant).
+// The structured (AGENTS_COUNCIL_STRUCTURED) path is exempt: there the member emits
+// a JSON payload whose candidate is not carried by the text marker, so the marker's
+// absence is not non-compliance and the raw payload stands (legacy structured behavior).
+async function askDeliberation(
+  member: ModelCouncilMember,
+  messages: ChatMessage[],
+  state: CouncilRunState,
+  round: number | null,
+): Promise<ModelCouncilCandidateProposal> {
+  const content = await askMember(member, messages, state, "deliberation", round);
+  const parsed = parseCandidateConsensus(content);
+  if (parsed !== null) {
+    return { member: toMemberRef(member), content, candidateConsensus: parsed };
+  }
+  if (isStructuredCouncilEnabled()) {
+    return { member: toMemberRef(member), content, candidateConsensus: content.trim() };
+  }
+  const resendContent = await askMember(member, appendProtocolResendNote(messages), state, "deliberation", round);
+  const resendParsed = parseCandidateConsensus(resendContent);
+  if (resendParsed !== null) {
+    return { member: toMemberRef(member), content: resendContent, candidateConsensus: resendParsed };
+  }
+  return {
+    member: toMemberRef(member),
+    content: resendContent,
+    candidateConsensus: "",
+    protocolNoncompliant: true,
+  };
+}
+
+// Append a single "resend in protocol format" instruction to a deliberation prompt
+// for the A4 one-shot re-ask. Kept minimal so the re-ask reuses the exact prior
+// prompt plus the corrective note, rather than re-deriving a second builder.
+function appendProtocolResendNote(messages: ChatMessage[]): ChatMessage[] {
+  return [
+    ...messages,
+    {
+      role: "user",
+      content:
+        "Your previous reply omitted the required 'CANDIDATE_CONSENSUS:' section. Resend your full answer in the required protocol format, ending with a 'CANDIDATE_CONSENSUS:' section that contains the complete candidate consensus text.",
+    },
+  ];
+}
+
 // FACTUAL_ERROR and MATERIAL_DISAGREEMENT are absolute vetoes (F7): unlike a
 // repairable objection (INSUFFICIENT_EVIDENCE, SYNTHESIS_ERROR, or a bare BLOCK),
 // they cannot be resolved by folding in edits — no rewrite makes a false claim true
@@ -878,11 +1057,13 @@ function isAbsoluteVeto(ratification: ModelCouncilRatification): boolean {
   );
 }
 
-// True when ratification ran and at least one member withheld acceptance. Such a
-// block is frequently conditional ("ACCEPT after these edits") rather than a hard
-// veto, so it is worth one synthesis-and-re-ratify repair cycle before recording
-// "blocked". An absolute veto (F7) is the exception: it overrides any
-// ACCEPT_WITH_EDITS and skips repair, because synthesis cannot clear it.
+// True when ratification ran and at least one member cast a plain, repairable BLOCK
+// (INSUFFICIENT_EVIDENCE / SYNTHESIS_ERROR / PROTOCOL / a bare BLOCK). Such a block
+// carries a stated path-to-accept, so it is worth one synthesis-and-re-ratify repair
+// cycle before recording "blocked". Two decisions are NOT repaired here: an absolute
+// veto (F7) — synthesis cannot clear a false claim or a genuine split; and, as of
+// A1, an ACCEPT_WITH_EDITS-only slate — those are folded terminally (isRatifiedWithEdits
+// -> ratified_with_edits) rather than re-ratified, which is the loop A1 removes.
 export function shouldAttemptRepair(ratifications: ModelCouncilRatification[]): boolean {
   if (ratifications.length === 0) {
     return false;
@@ -890,7 +1071,21 @@ export function shouldAttemptRepair(ratifications: ModelCouncilRatification[]): 
   if (ratifications.some(isAbsoluteVeto)) {
     return false;
   }
-  return ratifications.some((ratification) => !ratification.accepted);
+  return ratifications.some((ratification) => ratification.vote.decision === "block");
+}
+
+// A1: true when the decisive ratifications reached consensus that only needs edits —
+// no BLOCK and no absolute veto, but >= 1 ACCEPT_WITH_EDITS. The engine then folds
+// every required edit into the final consensus once (never re-ratified) and records
+// the `ratified_with_edits` outcome. All-ACCEPT (no AWE) is a clean `ratified`, not this.
+export function isRatifiedWithEdits(ratifications: ModelCouncilRatification[]): boolean {
+  if (ratifications.length === 0) {
+    return false;
+  }
+  if (ratifications.some((ratification) => ratification.vote.decision === "block")) {
+    return false;
+  }
+  return ratifications.some((ratification) => ratification.vote.decision === "accept_with_edits");
 }
 
 // Format a convergence metric, tolerating transcripts written before these
@@ -933,15 +1128,19 @@ export function formatModelCouncilMarkdown(result: ModelCouncilResult): string {
   const lines: string[] = [
     result.consensus.outcome === "ratified"
       ? "# Council Consensus"
-      : result.consensus.outcome === "blocked"
-        ? "# Council Consensus Blocked"
-        : "# Council Consensus Not Reached",
+      : result.consensus.outcome === "ratified_with_edits"
+        ? "# Council Consensus (Ratified with Edits)"
+        : result.consensus.outcome === "blocked"
+          ? "# Council Consensus Blocked"
+          : "# Council Consensus Not Reached",
     "",
     `_Generated ${new Date().toISOString()}_`,
     "",
-    result.consensus.reached
-      ? "Consensus reached by unanimous peer ratification. No single agent decided the result."
-      : "Consensus was not reached. No single agent decided the result.",
+    result.consensus.outcome === "ratified_with_edits"
+      ? "Consensus reached by peer ratification with folded edits (no single agent decided the result)."
+      : result.consensus.reached
+        ? "Consensus reached by unanimous peer ratification. No single agent decided the result."
+        : "Consensus was not reached. No single agent decided the result.",
     "",
     "## Question",
     "",
@@ -960,7 +1159,11 @@ export function formatModelCouncilMarkdown(result: ModelCouncilResult): string {
     `- Peer ratifications: ${result.ratifications.length}`,
     `- Outcome: ${result.consensus.outcome}${result.consensus.notRatifiedReason ? ` (${result.consensus.notRatifiedReason})` : ""}`,
     `- Accepted by: ${result.consensus.ratifiedBy.join(", ") || "none"}`,
+    ...(result.consensus.acceptedWithEditsBy && result.consensus.acceptedWithEditsBy.length > 0
+      ? [`- Accepted with edits by: ${result.consensus.acceptedWithEditsBy.join(", ")}`]
+      : []),
     `- Blocked by: ${result.consensus.blockedBy.join(", ") || "none"}`,
+    ...(result.solo ? ["- Solo council: yes (quorum waived; self-ratified)"] : []),
     "",
     "## Convergence",
     "",
@@ -976,6 +1179,19 @@ export function formatModelCouncilMarkdown(result: ModelCouncilResult): string {
     "## Members",
     "",
     ...result.members.map((member) => `- **${member.name}** — \`${member.model}\` (${member.provider})`),
+    // A3: record the anonymous-label -> real-member map used in the mid-run prompts,
+    // so the transcript both keeps real identities and documents which label was which.
+    ...(result.peerLabels && result.peerLabels.length > 0
+      ? [
+          "",
+          "## Peer Labels",
+          "",
+          "Mid-run prompts referred to peers by these anonymous labels (real identities preserved here):",
+          ...result.peerLabels.map(
+            (entry) => `- ${entry.label} = **${entry.member.name}** (\`${entry.member.model}\`)`,
+          ),
+        ]
+      : []),
     "",
     "## Initial Proposals",
     ...result.responses.flatMap((response) => ["", `### ${response.member.name}`, "", response.content]),
@@ -1020,6 +1236,22 @@ export function formatModelCouncilMarkdown(result: ModelCouncilResult): string {
       lines.push("", `#### ${ratification.member.name} — ${verdict}`, "", ratification.content);
     }
     lines.push("", "### Revised candidate", "", result.repair.revisedCandidate);
+  }
+
+  // A1: the engine-native fold — rendered on a ratified_with_edits outcome so the
+  // Consensus Answer above is legible as "the chair's fold of these required edits".
+  if (result.fold) {
+    lines.push(
+      "",
+      "## Folded Edits",
+      "",
+      result.fold.foldError
+        ? `${result.fold.synthesizedBy.name} attempted to fold the required edits below, but the fold synthesis failed (${result.fold.foldError}); the Consensus Answer above is the unfolded candidate (outcome stays ratified_with_edits).`
+        : `${result.fold.synthesizedBy.name} folded the required edits below into the Consensus Answer above (ratified with edits; the folded artifact was not re-ratified).`,
+    );
+    for (const edit of result.fold.foldedEdits) {
+      lines.push("", `### ${edit.member.name}`, "", edit.requiredEdits);
+    }
   }
 
   // Minority report (WU-B4): a first-class, consolidated record of the blocking
@@ -1369,6 +1601,34 @@ function formatModelCouncilFailureMarkdown(failure: ModelCouncilFailure): string
   }
   lines.push("");
   return lines.join("\n");
+}
+
+// A2: enforce a two-member quorum at roster resolution. Returns true when the
+// council is running solo under a waived quorum (so the result can be flagged
+// `solo: true`), false for a normal >= 2 roster. Throws a clear, actionable error
+// when the roster is sub-quorum and AGENTS_COUNCIL_ALLOW_SOLO is not set — a
+// council of one is degenerate (the lone voter always ratifies itself), so it must
+// never proceed as a silent plain `ratified`.
+function enforceQuorum(members: ModelCouncilMember[]): boolean {
+  if (members.length >= 2) {
+    return false;
+  }
+  if (!isSoloCouncilAllowed()) {
+    throw new Error(
+      `A council needs at least 2 members to reach peer consensus; the resolved roster has ${members.length}. ` +
+        `Widen AGENTS_COUNCIL_MEMBERS, or set ${ALLOW_SOLO_ENV}=1 to run a solo council (flagged as such).`,
+    );
+  }
+  process.stderr.write(
+    `WARNING: running a SOLO council with ${members.length} member — there is no peer to ratify against, ` +
+      `so the outcome is self-ratified and marked solo:true. Set a >= 2 roster for a real consensus.\n`,
+  );
+  return true;
+}
+
+function isSoloCouncilAllowed(): boolean {
+  const raw = readEnv(ALLOW_SOLO_ENV);
+  return raw === "1" || raw?.toLowerCase() === "true" || raw?.toLowerCase() === "yes";
 }
 
 function validateCouncilConfig(members: ModelCouncilMember[]): void {
@@ -2223,7 +2483,7 @@ export function buildDeliberationMessages(
       ? formatCouncilResponses("Latest peer proposed candidate solutions", previousProposals)
       : "Latest peer proposed candidate solutions:\n(none yet)",
     "",
-    "Return your critique, then CONSENSUS_STATUS: CONVERGED or DIVERGED, then MATERIAL_DISAGREEMENTS: a one-line list or NONE, and finally CANDIDATE_CONSENSUS: followed by the full candidate consensus text as the last section.",
+    "Return your critique, then CONSENSUS_STATUS: CONVERGED or DIVERGED, then MATERIAL_DISAGREEMENTS: a one-line list or NONE, then PREFERRED_DRAFT: the label of the single strongest candidate draft to carry forward (a peer's 'Member X' label, or SELF for your own), and finally CANDIDATE_CONSENSUS: followed by the full candidate consensus text as the last section.",
   );
 
   return [
@@ -2236,7 +2496,7 @@ export function buildDeliberationMessages(
         "Challenge weak reasoning, adopt stronger reasoning from peers, and produce the exact candidate consensus text you would be willing to ratify.",
         "Name remaining disagreements only if they materially affect the final recommendation.",
         "Your response must contain a CANDIDATE_CONSENSUS: section with the full candidate answer. Keep the candidate unchanged if it is already the maximal solution.",
-        "Before the candidate, emit two marker lines: 'CONSENSUS_STATUS: CONVERGED' if the council now agrees and the candidate is ratifiable as-is, otherwise 'CONSENSUS_STATUS: DIVERGED'; and 'MATERIAL_DISAGREEMENTS:' followed by a one-line list of the substantive disagreements still blocking consensus, or NONE. Put the CANDIDATE_CONSENSUS: section last so the candidate text is captured cleanly.",
+        "Before the candidate, emit three marker lines: 'CONSENSUS_STATUS: CONVERGED' if the council now agrees and the candidate is ratifiable as-is, otherwise 'CONSENSUS_STATUS: DIVERGED'; 'MATERIAL_DISAGREEMENTS:' followed by a one-line list of the substantive disagreements still blocking consensus, or NONE; and 'PREFERRED_DRAFT:' naming the single strongest candidate draft to carry forward — a peer's anonymized 'Member X' label, or SELF for your own — judged on merit, not identity. Put the CANDIDATE_CONSENSUS: section last so the candidate text is captured cleanly.",
       ].join(" "),
     },
     {
@@ -2254,6 +2514,7 @@ export function buildRatificationMessages(
   rounds: ModelCouncilRound[],
   candidateConsensus: string,
   member: ModelCouncilMember,
+  evidencePack?: EvidencePackEntry[],
 ): ChatMessage[] {
   // Ratifiers participated in every round, so they only need the artifact to
   // ratify plus the latest peer positions — not the full deliberation history,
@@ -2262,6 +2523,13 @@ export function buildRatificationMessages(
   const finalPositions = finalRound
     ? formatCouncilResponses("Final peer positions (latest deliberation round)", finalRound.proposals)
     : "Final peer positions (latest deliberation round):\n(none)";
+  // A5: the evidence pack appears in round-0 proposals but not, historically, in
+  // ratification prompts — so a ratifier could not run the SOURCE_ID_MISMATCH /
+  // FACTUAL_ERROR check against evidence it never saw. Include it here by a
+  // deterministic size rule: the full pack when it is small, else a compact index
+  // (ids + source names) so a large pack cannot blow up every ratifier's prompt.
+  const evidenceBlock =
+    evidencePack && evidencePack.length > 0 ? ["", formatEvidencePackForRatification(evidencePack)] : [];
   return [
     {
       role: "system",
@@ -2281,6 +2549,7 @@ export function buildRatificationMessages(
       content: [
         "Original request:",
         prompt,
+        ...evidenceBlock,
         "",
         finalPositions,
         "",
@@ -2289,6 +2558,23 @@ export function buildRatificationMessages(
       ].join("\n"),
     },
   ];
+}
+
+// A5: the maximum full-pack length (chars of the rendered block) at which the
+// entire evidence pack is inlined into a ratification prompt. Above it, only a
+// compact id+source index is sent. Deterministic; documented in docs/council.md.
+const EVIDENCE_PACK_RATIFICATION_INLINE_MAX_CHARS = 8000;
+
+// Render the evidence pack for a ratification prompt under the A5 size rule: the
+// full citable pack when it fits, otherwise a compact index of claim ids + source
+// names so a SOURCE_ID_MISMATCH / FACTUAL_ERROR check can still resolve cited ids.
+function formatEvidencePackForRatification(evidencePack: EvidencePackEntry[]): string {
+  const full = formatEvidencePack(evidencePack);
+  if (full.length <= EVIDENCE_PACK_RATIFICATION_INLINE_MAX_CHARS) {
+    return full;
+  }
+  const index = evidencePack.map((entry) => `- [${entry.id}] (${entry.source})`).join("\n");
+  return `Evidence pack index (claim ids + sources; full text omitted for length — cite entries by their [id]):\n${index}`;
 }
 
 // Prompt one member to synthesize a single revised consensus artifact that folds
@@ -2386,13 +2672,46 @@ export function parseRatificationAccepted(content: string): boolean {
   return parseRatificationVote(content).decision === "accept";
 }
 
-function parseCandidateConsensus(content: string): string {
+// Parse the candidate draft out of a member's reply. A4: a reply with no
+// CANDIDATE_CONSENSUS marker is NOT a candidate draft — it returns null (was
+// content.trim()), so a markerless reply cannot silently become the whole draft.
+// The caller (askDeliberation) re-asks once, then records protocol-noncompliance.
+function parseCandidateConsensus(content: string): string | null {
   const marker = "CANDIDATE_CONSENSUS:";
   const index = content.toUpperCase().indexOf(marker);
   if (index < 0) {
-    return content.trim();
+    return null;
   }
   return content.slice(index + marker.length).trim();
+}
+
+// A4: parse a member's PREFERRED_DRAFT nomination — the anonymized label of the
+// draft it wants carried forward. "SELF" nominates the voter's own draft; "Member X"
+// nominates the peer at roster index X (A=0, B=1, …, or a 1-based numeric form for
+// rosters past Z). Tolerates the same leading markdown glyphs as the other parsers.
+// Returns null when no parseable PREFERRED_DRAFT line is present.
+function parsePreferredDraft(content: string): { kind: "self" } | { kind: "member"; index: number } | null {
+  const lines = content.split(/\r?\n/).map((line) => line.trim().replace(/^[>*_`#\s-]+/, ""));
+  const re = /^PREFERRED_DRAFT:\s*(.+)$/i;
+  const value = lines
+    .find((line) => re.test(line))
+    ?.match(re)?.[1]
+    ?.trim();
+  if (!value) {
+    return null;
+  }
+  if (/^SELF\b/i.test(value)) {
+    return { kind: "self" };
+  }
+  const letter = value.match(/^MEMBER\s+([A-Z])\b/i)?.[1];
+  if (letter) {
+    return { kind: "member", index: letter.toUpperCase().charCodeAt(0) - 65 };
+  }
+  const numeric = value.match(/^MEMBER\s+(\d+)\b/i)?.[1];
+  if (numeric) {
+    return { kind: "member", index: Number.parseInt(numeric, 10) - 1 };
+  }
+  return null;
 }
 
 // A member's self-reported convergence signal, parsed from the CONSENSUS_STATUS /
@@ -2485,11 +2804,15 @@ export async function parseConsensusSignalStructured(content: string): Promise<C
 }
 
 export async function parseCandidateConsensusStructured(content: string): Promise<string> {
+  // This exported wrapper keeps its legacy string contract: a markerless reply
+  // yields the trimmed content (A4's null is an internal deliberation-loop signal,
+  // not this seam's concern), so callers of the structured wrapper are unaffected.
+  const textFallback = (raw: string): string => parseCandidateConsensus(raw) ?? raw.trim();
   if (!isStructuredCouncilEnabled()) {
-    return parseCandidateConsensus(content);
+    return textFallback(content);
   }
   const { parseStructuredOrFallback, DeliberationResponseSchema } = await import("./council/schemas");
-  const parsed = parseStructuredOrFallback(content, DeliberationResponseSchema, parseCandidateConsensus);
+  const parsed = parseStructuredOrFallback(content, DeliberationResponseSchema, textFallback);
   return typeof parsed === "string" ? parsed : parsed.candidateConsensus;
 }
 
@@ -2626,25 +2949,69 @@ export async function evaluateRatificationPreconditions(
   return blocks;
 }
 
-export function buildCandidateConsensus(proposals: ModelCouncilCandidateProposal[]): string {
-  const drafts = proposals
-    .map((proposal) => proposal.candidateConsensus.trim())
-    .filter((candidate) => candidate.length > 0);
-  if (drafts.length === 0) {
-    return "";
+// A4: nominate the round's shared candidate from the members' drafts. Nomination
+// order: (1) if every non-empty draft is byte-identical, that shared draft wins
+// ("unanimous"); (2) otherwise run PREFERRED_DRAFT approval voting — the draft with
+// the most nominations wins, ties broken by roster order (the "latest round" tie-
+// break in the spec does not apply within a single round's nomination); (3) if no
+// member emitted a parseable PREFERRED_DRAFT, fall back to the most-complete
+// (longest) draft, as before ("longest_fallback"). A protocol-noncompliant member
+// contributes an empty draft (A4) and is excluded from both the drafts and the tally.
+export function nominateCandidateConsensus(proposals: ModelCouncilCandidateProposal[]): CandidateNomination {
+  const drafts = proposals.map((proposal) => proposal.candidateConsensus.trim());
+  const nonEmpty = drafts.filter((draft) => draft.length > 0);
+  if (nonEmpty.length === 0) {
+    return { candidate: "", method: "none" };
   }
-  const normalizedCandidates = new Set(drafts.map((draft) => normalizeCandidate(draft)));
+  const normalizedCandidates = new Set(nonEmpty.map((draft) => normalizeCandidate(draft)));
   if (normalizedCandidates.size === 1) {
-    return drafts[0]!;
+    return { candidate: nonEmpty[0]!, method: "unanimous" };
   }
-  // The members agree substantively but their drafts are not byte-identical —
-  // verbose reasoners effectively never converge to identical prose. Emitting a
-  // stitched "not yet unified" blob here is fatal: it is unratifiable by
-  // construction (it literally announces its own non-unification, forcing every
-  // ratifier to BLOCK). Instead nominate the single most-complete draft as the
-  // candidate so the ratify phase votes on one coherent artifact; the repair
-  // cycle in runModelCouncil then folds in any peer-required edits.
-  return drafts.reduce((best, draft) => (draft.length > best.length ? draft : best));
+
+  // Approval voting: each member's PREFERRED_DRAFT is a vote for one draft (its own
+  // via SELF, or a peer's by "Member X" roster label). Votes for an empty/out-of-range
+  // draft are discarded so a noncompliant member can never be nominated.
+  const approvals = new Map<number, number>();
+  for (let voter = 0; voter < proposals.length; voter++) {
+    const preferred = parsePreferredDraft(proposals[voter]!.content);
+    if (preferred === null) {
+      continue;
+    }
+    const target = preferred.kind === "self" ? voter : preferred.index;
+    if (target < 0 || target >= proposals.length || drafts[target]!.length === 0) {
+      continue;
+    }
+    approvals.set(target, (approvals.get(target) ?? 0) + 1);
+  }
+  if (approvals.size > 0) {
+    let bestIndex = -1;
+    let bestVotes = 0;
+    // Iterate in roster order and update only on a STRICT increase, so a tie keeps
+    // the earliest-roster draft — the operative tie-break within a single round.
+    for (let index = 0; index < proposals.length; index++) {
+      const votes = approvals.get(index) ?? 0;
+      if (votes > bestVotes) {
+        bestVotes = votes;
+        bestIndex = index;
+      }
+    }
+    if (bestIndex >= 0) {
+      return { candidate: drafts[bestIndex]!, method: "approval" };
+    }
+  }
+
+  // No parseable PREFERRED_DRAFT: fall back to the single most-complete draft so the
+  // ratify phase still votes on one coherent artifact (recorded as the fallback).
+  return {
+    candidate: nonEmpty.reduce((best, draft) => (draft.length > best.length ? draft : best)),
+    method: "longest_fallback",
+  };
+}
+
+// Thin string-returning view of nominateCandidateConsensus, kept for the public
+// contract and unit tests that assert only the chosen candidate text.
+export function buildCandidateConsensus(proposals: ModelCouncilCandidateProposal[]): string {
+  return nominateCandidateConsensus(proposals).candidate;
 }
 
 function candidateChanged(previousCandidate: string, nextCandidate: string): boolean {
@@ -2820,26 +3187,40 @@ export function buildConsensusResult(
       notRatifiedReason: "no candidate consensus emerged before max rounds",
     };
   }
+  // Partition by the ternary vote. A1: an ACCEPT_WITH_EDITS voter agreed on the
+  // substance (its edits are folded by the chair), so it is NEVER a blocker — only
+  // a `block` decision lands in blockedBy. This is the fix for the old code, which
+  // put every non-accepted vote (including AWE) into blockedBy and thus misclassified
+  // AWE voters as blockers.
   const ratifiedBy = ratifications
-    .filter((ratification) => ratification.accepted)
+    .filter((ratification) => ratification.vote.decision === "accept")
+    .map((ratification) => ratification.member.name);
+  const acceptedWithEditsBy = ratifications
+    .filter((ratification) => ratification.vote.decision === "accept_with_edits")
     .map((ratification) => ratification.member.name);
   const blockedBy = ratifications
-    .filter((ratification) => !ratification.accepted)
+    .filter((ratification) => ratification.vote.decision === "block")
     .map((ratification) => ratification.member.name);
-  const reached = blockedBy.length === 0 && ratifiedBy.length === ratifications.length;
-  if (reached) {
-    return { reached: true, outcome: "ratified", ratifiedBy, blockedBy };
+
+  if (blockedBy.length === 0) {
+    // No BLOCK/veto. All ACCEPT -> ratified; any ACCEPT_WITH_EDITS -> ratified_with_edits
+    // (A1). Both reached consensus; the AWE case additionally records who required edits.
+    if (acceptedWithEditsBy.length === 0) {
+      return { reached: true, outcome: "ratified", ratifiedBy, blockedBy };
+    }
+    return { reached: true, outcome: "ratified_with_edits", ratifiedBy, acceptedWithEditsBy, blockedBy };
   }
+
   // Blocked. If the block is an absolute veto (F7), say so in the reason so the
   // outcome is self-explaining — a hard stop, not a repairable "ACCEPT after edits".
   const veto = ratifications.find(isAbsoluteVeto);
-  // Minority report (WU-B4): every dissenting ratification becomes a first-class
-  // record, so the blocking objections — including a WU-B2 claim-ledger
-  // FACTUAL_ERROR precondition, which is itself a blocking ratification — are never
-  // silently dropped on a `blocked` outcome. Keyed off `blocked` only; the top-level
-  // enum is unchanged (INV-6).
+  // Minority report (WU-B4): every BLOCK becomes a first-class record, so the
+  // blocking objections — including a WU-B2 claim-ledger FACTUAL_ERROR precondition,
+  // which is itself a blocking ratification — are never silently dropped on a
+  // `blocked` outcome. An ACCEPT_WITH_EDITS voter is excluded (it did not block).
+  // Keyed off `blocked` only; consumers key on the top-level `outcome`.
   const minorityReport: MinorityReportEntry[] = ratifications
-    .filter((ratification) => !ratification.accepted)
+    .filter((ratification) => ratification.vote.decision === "block")
     .map((ratification) => ({
       member: ratification.member.name,
       ...(ratification.vote.blockKind ? { blockKind: ratification.vote.blockKind } : {}),
@@ -2850,19 +3231,29 @@ export function buildConsensusResult(
     reached: false,
     outcome: "blocked",
     ratifiedBy,
+    ...(acceptedWithEditsBy.length > 0 ? { acceptedWithEditsBy } : {}),
     blockedBy,
     ...(veto ? { notRatifiedReason: `unrepairable veto: ${veto.vote.blockKind} (raised by ${veto.member.name})` } : {}),
     minorityReport,
   };
 }
 
+// A3: render peer positions for a mid-run prompt under stable anonymous labels
+// ("Member A", "Member B", … by position, which is roster order at every call site)
+// instead of "## <name> (<model>)". This suppresses prestige bias — a member judges
+// a draft on its merits, not on who wrote it. The saved transcript (formatModelCouncilMarkdown)
+// still renders real identities; only these mid-run prompts are anonymized.
 function formatCouncilResponses(title: string, responses: ModelCouncilResponse[]): string {
   return [
     title + ":",
-    ...responses.map((response) =>
-      [`## ${response.member.name} (${response.member.model})`, response.content].join("\n"),
-    ),
+    ...responses.map((response, index) => [`## ${peerLabel(index)}`, response.content].join("\n")),
   ].join("\n\n");
+}
+
+// A3: the stable anonymous label for the member at a given roster index — Member A,
+// Member B, …, then a 1-based numeric form ("Member 27") for rosters past Z.
+function peerLabel(index: number): string {
+  return index < 26 ? `Member ${String.fromCharCode(65 + index)}` : `Member ${index + 1}`;
 }
 
 function readEnv(name: string): string | null {

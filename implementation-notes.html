@@ -184,6 +184,62 @@ brief-size precheck. All in <code>src/core/services/modelCouncil.ts</code> + a n
   curl shim's bearer-token hygiene (0600 <code>wx</code> config file, never argv) is untouched.</p>
   <p class="why"><b>Why it matters:</b> the disk side-effect is a genuine behavior change to flag; the bearer-token invariant was
   the lane's stated hard constraint and did not regress.</p>
+<h2>Session 2026-07-12 — Lane A: outcome semantics + deliberation epistemics</h2>
+
+<p class="sub">Implemented Lane A of the council-hardening build on branch <code>lane/council-a</code>:
+A1 <code>ratified_with_edits</code> outcome + engine-native fold, A2 quorum guard, A3 peer anonymization,
+A4 markerless-exclusion + PREFERRED_DRAFT nomination, A5 evidence pack in ratification. All in
+<code>src/core/services/modelCouncil.ts</code>. 145 tests pass (121 baseline + 24 added/changed).</p>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span> A1 fold replaces the repair cycle for <code>ACCEPT_WITH_EDITS</code>; <code>shouldAttemptRepair</code> narrowed to plain BLOCKs only.</h3>
+  <div class="meta">2026-07-12 · <code>shouldAttemptRepair</code>, <code>isRatifiedWithEdits</code>, <code>runModelCouncil</code></div>
+  <p>The spec's fold must not re-ratify, but the existing repair cycle <i>does</i> synthesize-then-re-ratify and
+  previously fired for any non-accept (including AWE). Leaving it would run the repair re-ratify <b>and</b> the fold for
+  an AWE slate — double synthesis, and re-introducing the exact re-ratify loop A1 removes. So <code>shouldAttemptRepair</code>
+  now fires only on a plain repairable BLOCK; an AWE-only slate skips repair and is folded terminally
+  (<code>isRatifiedWithEdits</code> → <code>ratified_with_edits</code>). This makes the spec's "or after first ratification
+  when repair was skipped" clause exact: an AWE-only first vote skips repair and folds.</p>
+  <p class="why"><b>Why it matters:</b> one existing test asserted <code>shouldAttemptRepair([acceptWithEdits]) === true</code>;
+  I flipped it to <code>false</code> with an explaining comment — a deliberate, spec-driven semantics change (SHARED.md permits this).</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Off-spec</span> <code>buildConsensusResult</code>: <code>blockedBy</code> and <code>minorityReport</code> are now BLOCK-only; added <code>acceptedWithEditsBy</code>.</h3>
+  <div class="meta">2026-07-12 · <code>ModelCouncilConsensus</code>, <code>buildConsensusResult</code></div>
+  <p>The old code put every non-accepted vote (AWE included) in <code>blockedBy</code> and the minority report. The spec
+  requires AWE voters not be misclassified as blockers, so both now filter on <code>decision === "block"</code>, and a new
+  <code>acceptedWithEditsBy[]</code> field names the AWE voters (populated on <code>ratified_with_edits</code> and on a mixed
+  <code>blocked</code>). No existing blocked test had an AWE voter, so nothing regressed.</p>
+  <p class="why"><b>Why:</b> self-describing result JSON; a blocked outcome's minority report should list only real blockers.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span> A4 markerless re-ask is gated OFF under <code>AGENTS_COUNCIL_STRUCTURED</code>.</h3>
+  <div class="meta">2026-07-12 · <code>askDeliberation</code>, <code>parseCandidateConsensus</code> (now returns <code>string | null</code>)</div>
+  <p><code>parseCandidateConsensus</code> now returns <code>null</code> for a markerless reply (per spec). But under the
+  structured flag members emit a JSON payload with no <code>CANDIDATE_CONSENSUS:</code> text marker — treating that as
+  "markerless → re-ask → excluded" would drop the structured claims the precondition checks depend on. So in the structured
+  path the raw payload stands (legacy behavior) and the re-ask is skipped; the A4 re-ask applies to the legacy text path only.</p>
+  <p class="why"><b>Why:</b> keeps the WU-B2 structured precondition path (<code>preconditionMinority</code> e2e) intact while honoring A4 for the default path.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span> A2 quorum guard changed 5 existing single-member tests; A3 labels are position-based.</h3>
+  <div class="meta">2026-07-12 · test env <code>AGENTS_COUNCIL_ALLOW_SOLO</code>; <code>formatCouncilResponses</code></div>
+  <ul>
+    <li><b>A2:</b> a single-member roster now throws at resolution. Five pre-existing tests that use a one-member
+    (<code>kimi</code>) roster to keep call order deterministic were updated to set <code>AGENTS_COUNCIL_ALLOW_SOLO=1</code>
+    (2 timeout tests, the repair e2e, the minorityReport CLI helper, the preconditionMinority e2e). Spec-driven.</li>
+    <li><b>A3:</b> peer labels are assigned by array <i>position</i> in <code>formatCouncilResponses</code>. This is stable
+    only because every call site passes the full roster in order (<code>members.map(...)</code>) — including markerless
+    (protocol-noncompliant) members, which stay in the proposals array with an empty draft. If a caller ever passed a
+    filtered subset, labels would drift; today none do.</li>
+    <li><b>A5 threshold:</b> the full-pack-vs-index cutover is a fixed <code>8000</code>-char constant on the rendered block.</li>
+    <li><b>Pre-existing:</b> whole-repo <code>bun run format:check</code> reports 4 baseline violations outside Lane A
+    (<code>council_runs/</code> + <code>harness/</code>: 2 unformatted <code>.ts</code>, 2 large <code>.json</code> data files).
+    Left untouched (surgical); all Lane A files pass format:check.</li>
+  </ul>
 </div>
 
 <h2>Session 2026-06-23 — Borrow bb's anti-polling primitive: <code>wait_for_session_data</code> MCP tool</h2>

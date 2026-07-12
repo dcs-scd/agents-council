@@ -18,12 +18,16 @@ describe("councilOutcomeExitCode", () => {
     expect(councilOutcomeExitCode("ratified")).toBe(0);
   });
 
+  test("ratified_with_edits exits 0 (A1: a folded-edits consensus is a success)", () => {
+    expect(councilOutcomeExitCode("ratified_with_edits")).toBe(0);
+  });
+
   test("not_attempted exits 0", () => {
     expect(councilOutcomeExitCode("not_attempted")).toBe(0);
   });
 
-  test("every frozen outcome maps to a conventional exit code (0 or 1)", () => {
-    const outcomes: ModelCouncilConsensusOutcome[] = ["ratified", "blocked", "not_attempted"];
+  test("every outcome maps to a conventional exit code (0 or 1)", () => {
+    const outcomes: ModelCouncilConsensusOutcome[] = ["ratified", "ratified_with_edits", "blocked", "not_attempted"];
     for (const outcome of outcomes) {
       expect([0, 1]).toContain(councilOutcomeExitCode(outcome));
     }
