@@ -155,6 +155,9 @@ async function runCliWithCannedReplies(cannedByCall: string[]): Promise<number> 
       env: {
         ...process.env,
         AGENTS_COUNCIL_MEMBERS: "kimi",
+        // A2: this exit-code proof deliberately uses a one-member roster; opt into the
+        // solo quorum so the run reaches the ratify/exit-code path instead of throwing.
+        AGENTS_COUNCIL_ALLOW_SOLO: "1",
         OPENROUTER_API_KEY: "test-key",
         AGENTS_COUNCIL_OPENROUTER_URL: server.url.toString(),
         AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS: "5000",

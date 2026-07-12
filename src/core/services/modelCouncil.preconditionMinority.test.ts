@@ -32,6 +32,8 @@ const FLAG = "AGENTS_COUNCIL_STRUCTURED";
 const TOUCHED_ENV = [
   FLAG,
   "AGENTS_COUNCIL_MEMBERS",
+  // A2: the end-to-end case uses a single-member roster, so it opts into the solo quorum.
+  "AGENTS_COUNCIL_ALLOW_SOLO",
   "OPENROUTER_API_KEY",
   "AGENTS_COUNCIL_OPENROUTER_URL",
   "AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS",
@@ -100,6 +102,7 @@ describe("M1 claim-ledger precondition reaches minorityReport + survives repair"
     ]);
     process.env[FLAG] = "1";
     process.env.AGENTS_COUNCIL_MEMBERS = "kimi";
+    process.env.AGENTS_COUNCIL_ALLOW_SOLO = "1";
     process.env.OPENROUTER_API_KEY = "test-key";
     process.env.AGENTS_COUNCIL_OPENROUTER_URL = server.url;
     process.env.AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS = "5000";
