@@ -1,4 +1,4 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -36,6 +36,19 @@ const MEMBERS_ENV = "AGENTS_COUNCIL_MEMBERS";
 // for a cheap two-member draft or "kimi,deepseek,gemini,chatgpt,claude" for the
 // full panel.
 const DEFAULT_MEMBER_IDS = ["claude", "chatgpt", "gemini"] as const;
+// WU-B5 brief-size precheck budgets, in tokens, per member id. These values are
+// DELIBERATELY CONSERVATIVE lower bounds — the smallest context each member is
+// assumed to serve reliably — so the advisory over-budget warning fires early
+// (before a silent upstream truncation) rather than promising a model's true
+// maximum. Override any of them with AGENTS_COUNCIL_CONTEXT_TOKENS_<ID>. The
+// precheck is advisory: an over-budget estimate never hard-fails the run.
+const DEFAULT_MEMBER_CONTEXT_TOKENS: Record<ModelCouncilMember["id"], number> = {
+  kimi: 128_000,
+  deepseek: 128_000,
+  gemini: 128_000,
+  chatgpt: 128_000,
+  claude: 128_000,
+};
 const OPENROUTER_TIMEOUT_ENV = "AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS";
 const OPENROUTER_URL_ENV = "AGENTS_COUNCIL_OPENROUTER_URL";
 const DIRECT_VENDOR_KEYS_ENV = "AGENTS_COUNCIL_DIRECT_VENDOR_KEYS";
@@ -45,6 +58,18 @@ const MOONSHOT_URL_ENV = "AGENTS_COUNCIL_MOONSHOT_URL";
 const DEEPSEEK_URL_ENV = "AGENTS_COUNCIL_DEEPSEEK_URL";
 const DEFAULT_OPENROUTER_TIMEOUT_MS = 300_000;
 const MIN_OPENROUTER_TIMEOUT_MS = 50;
+// WU-B1: a single per-member timeout governs EVERY provider path (the SDK/CLI
+// members that previously had no timeout, and the curl-based HTTP members).
+// Precedence: AGENTS_COUNCIL_MEMBER_TIMEOUT_MS > AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS
+// (legacy alias, still honored) > the shared 300s default.
+const MEMBER_TIMEOUT_ENV = "AGENTS_COUNCIL_MEMBER_TIMEOUT_MS";
+// WU-B5: when set to 1/true, a member whose round-0 brief is estimated over its
+// context budget is dropped pre-spend (recorded via the WU-B3 drop machinery)
+// instead of merely warned about. Advisory-only by default.
+const DROP_OVERSIZED_ENV = "AGENTS_COUNCIL_DROP_OVERSIZED";
+// WU-B5: per-member context-budget override prefix — AGENTS_COUNCIL_CONTEXT_TOKENS_<ID>
+// (uppercased member id), e.g. AGENTS_COUNCIL_CONTEXT_TOKENS_KIMI.
+const CONTEXT_TOKENS_ENV_PREFIX = "AGENTS_COUNCIL_CONTEXT_TOKENS_";
 // Maximum deliberation rounds before the council stops looping. Overridable via
 // AGENTS_COUNCIL_MAX_ROUNDS. Raised from 4 to 6 because runs were hitting the cap
 // while still actively converging (see the convergence trajectory in the result).
@@ -219,6 +244,83 @@ export type ModelCouncilResult = {
   // post-repair (decisive) values.
   repair?: ModelCouncilRepair;
   consensus: ModelCouncilConsensus;
+  // WU-B3: true when at least one member was dropped mid-run and the council
+  // continued over the survivors. Absent/false on a full-roster run.
+  degraded?: boolean;
+  // WU-B3: every member dropped terminally mid-run, with the phase/round and the
+  // reason (timeout, provider error, or oversized-brief pre-spend drop). Empty on
+  // a full-roster run.
+  droppedMembers?: CouncilDroppedMember[];
+  // WU-B4: one entry per successful provider call (member/provider/phase/round,
+  // wall time, prompt+response sizes, usage tokens where the API reports them).
+  ledger?: CouncilLedgerEntry[];
+  // WU-B4: aggregate totals across `ledger`. Pure observation — no control flow
+  // reads either field.
+  ledgerTotals?: CouncilLedgerTotals;
+};
+
+// WU-B3: the record of one member dropped terminally mid-run. `round` is null for
+// the pre-round proposal phase, the WU-B5 pre-spend precheck, and ratification.
+export type CouncilDroppedMember = {
+  id: ModelCouncilMember["id"];
+  phase: string;
+  round: number | null;
+  reason: string;
+};
+
+// WU-B4: token usage as reported by a provider, normalized across the vendor field
+// names (OpenRouter/Moonshot/DeepSeek `prompt_tokens`/`completion_tokens`; Codex
+// `input_tokens`/`output_tokens`; Claude `input_tokens`/`output_tokens`). null on
+// any provider path (Gemini CLI, injected test asker) that reports no usage.
+export type CouncilTokenUsage = {
+  promptTokens: number | null;
+  completionTokens: number | null;
+  totalTokens: number | null;
+};
+
+// WU-B4: one per-call cost/latency ledger row. Pure observation.
+export type CouncilLedgerEntry = {
+  member: string;
+  provider: ModelCouncilMember["provider"];
+  phase: string;
+  round: number | null;
+  wallMs: number;
+  promptChars: number;
+  responseChars: number;
+  usage: CouncilTokenUsage | null;
+};
+
+// WU-B4: aggregate totals across the ledger. Token totals are null unless at least
+// one call reported the corresponding usage figure.
+export type CouncilLedgerTotals = {
+  calls: number;
+  wallMs: number;
+  promptChars: number;
+  responseChars: number;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  totalTokens: number | null;
+};
+
+// WU-B2: one line of the crash-insurance partial checkpoint
+// (deliberations/council-<ts>.partial.jsonl). A completed member call carries
+// `content` (proposal/deliberation/synthesis) or `votes` (ratification); a drop
+// carries `id` + `reason` and no payload.
+export type PartialPhaseRecord = {
+  phase: string;
+  round: number | null;
+  member?: string;
+  id?: ModelCouncilMember["id"];
+  timestamp: string;
+  content?: string;
+  votes?: RatificationVote;
+  reason?: string;
+};
+
+// WU-B2: the completed work salvaged from a partial checkpoint at failure time.
+export type CouncilPartialSnapshot = {
+  completedPhases: PartialPhaseRecord[];
+  droppedMembers: CouncilDroppedMember[];
 };
 
 // A single evidence-pack entry supplied by the caller. Plumbing only (WU-B3):
@@ -242,6 +344,14 @@ export type ModelCouncilFailure = {
   prompt: string;
   error: string;
   members: ModelCouncilMember[];
+  // WU-B2: completed work salvaged from the run's partial checkpoint (proposals,
+  // deliberation rounds, partial ratifications). Additive/optional — the schema
+  // version is unchanged because a consumer that ignores these fields still reads
+  // a valid v1 record. Absent when no work had completed before the failure.
+  completedPhases?: PartialPhaseRecord[];
+  // WU-B2/B3: any members dropped before the run failed, recovered from the
+  // checkpoint. Absent when none were dropped.
+  droppedMembers?: CouncilDroppedMember[];
 };
 
 // A content part lets us mark a stable prefix with cache_control so OpenRouter
@@ -284,6 +394,9 @@ type OpenRouterChoice = {
 
 type OpenRouterResponse = {
   choices?: OpenRouterChoice[];
+  // Present on most OpenAI-compatible providers (OpenRouter/Moonshot/DeepSeek);
+  // shape read tolerantly by toTokenUsage (WU-B4).
+  usage?: unknown;
   error?: {
     message?: string;
   };
@@ -326,12 +439,25 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
   const members = buildDefaultMembers();
   validateCouncilConfig(members);
 
-  const responses = await Promise.all(
-    members.map(async (member) => ({
-      member: toMemberRef(member),
-      content: await askMember(member, buildProposalMessages(prompt, member, input.evidencePack)),
-    })),
+  // WU-B2/B3/B4: a per-run accumulator carries the shrinking survivor roster, the
+  // drop ledger, the cost/latency ledger, and the crash-insurance checkpoint path.
+  const state = await createRunState(prompt, members);
+
+  // WU-B5: advisory brief-size precheck, before any spend. Warns (and, only under
+  // AGENTS_COUNCIL_DROP_OVERSIZED=1, drops via the WU-B3 machinery) but never
+  // hard-fails on an estimate alone.
+  await briefSizePrecheck(state, input.evidencePack);
+
+  // WU-B3: round-0 independent proposals over the surviving roster. A member that
+  // fails terminally here is dropped; the phase throws only if the drop leaves
+  // fewer than two survivors (checkpoint preserved for the failure record).
+  const proposalContent = await runMemberPhase(state, "proposal", null, (member) =>
+    askMember(member, buildProposalMessages(prompt, member, input.evidencePack), state, "proposal", null),
   );
+  const responses: ModelCouncilResponse[] = state.active.map((member) => ({
+    member: toMemberRef(member),
+    content: proposalContent.get(member)!,
+  }));
 
   const rounds: ModelCouncilRound[] = [];
   let candidateConsensus = "";
@@ -339,19 +465,23 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
   const maxRounds = resolveMaxRounds();
 
   for (let index = 1; index <= maxRounds; index++) {
-    const proposals = await Promise.all(
-      members.map(async (member) => {
-        const content = await askMember(
-          member,
-          buildDeliberationMessages(prompt, responses, previousProposals, candidateConsensus, member, index),
-        );
-        return {
-          member: toMemberRef(member),
-          content,
-          candidateConsensus: parseCandidateConsensus(content),
-        };
-      }),
+    const roundContent = await runMemberPhase(state, "deliberation", index, (member) =>
+      askMember(
+        member,
+        buildDeliberationMessages(prompt, responses, previousProposals, candidateConsensus, member, index),
+        state,
+        "deliberation",
+        index,
+      ),
     );
+    const proposals: ModelCouncilCandidateProposal[] = state.active.map((member) => {
+      const content = roundContent.get(member)!;
+      return {
+        member: toMemberRef(member),
+        content,
+        candidateConsensus: parseCandidateConsensus(content),
+      };
+    });
     const nextCandidateConsensus = buildCandidateConsensus(proposals);
     const changed = candidateChanged(candidateConsensus, nextCandidateConsensus);
     const similarityToPrevious = index === 1 ? null : tokenSimilarity(candidateConsensus, nextCandidateConsensus);
@@ -385,7 +515,7 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
   // ratification entirely and recorded `not_attempted` even when the members in
   // fact agreed. The members' own ACCEPT/BLOCK votes are the real consensus test.
   const hasCandidate = candidateConsensus.trim().length > 0;
-  let ratifications = hasCandidate ? await ratifyCandidate(members, prompt, rounds, candidateConsensus) : [];
+  let ratifications = hasCandidate ? await ratifyCandidate(state, prompt, rounds, candidateConsensus) : [];
 
   // WU-B2: claim-ledger ratification preconditions. Under AGENTS_COUNCIL_STRUCTURED
   // only (INV-2), inspect the structured claims the members emitted and prepend an
@@ -415,9 +545,17 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
   // acceptance, the disagreement is real and the outcome stays "blocked".
   let repair: ModelCouncilRepair | undefined;
   if (shouldAttemptRepair(ratifications)) {
-    const synthesizer = members[0]!;
+    // WU-B3: chair duties follow the surviving roster — the first survivor, not
+    // necessarily the original members[0], synthesizes the repair.
+    const synthesizer = state.active[0]!;
     const revisedCandidate = parseCandidateConsensus(
-      await askMember(synthesizer, buildSynthesisMessages(prompt, candidateConsensus, ratifications, synthesizer)),
+      await askMember(
+        synthesizer,
+        buildSynthesisMessages(prompt, candidateConsensus, ratifications, synthesizer),
+        state,
+        "synthesis",
+        null,
+      ),
     );
     if (revisedCandidate.length > 0 && candidateChanged(candidateConsensus, revisedCandidate)) {
       repair = {
@@ -425,12 +563,12 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
         revisedCandidate,
         synthesizedBy: toMemberRef(synthesizer),
       };
-      ratifications = await ratifyCandidate(members, prompt, rounds, revisedCandidate);
+      ratifications = await ratifyCandidate(state, prompt, rounds, revisedCandidate);
       candidateConsensus = revisedCandidate;
     }
   }
 
-  return {
+  const result: ModelCouncilResult = {
     prompt,
     members,
     responses,
@@ -440,31 +578,290 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
     converged,
     ratifications,
     repair,
-    consensus: buildConsensusResult(ratifications, members),
+    consensus: buildConsensusResult(ratifications, state.active),
+    degraded: state.dropped.length > 0,
+    droppedMembers: state.dropped,
+    ledger: state.ledger,
+    ledgerTotals: aggregateLedger(state.ledger),
   };
+  // WU-B2: the run completed — the checkpoint's crash insurance is no longer
+  // needed, so remove it. (A thrown failure above leaves it in place for the
+  // failure record to reconstruct from.)
+  await finalizePartial(state);
+  return result;
 }
 
 // Ratify a single candidate artifact: every member independently votes
 // ACCEPT/BLOCK after reading the latest peer positions. Shared by the first
 // ratify round and the post-repair re-ratify so both use one implementation.
 async function ratifyCandidate(
-  members: ModelCouncilMember[],
+  state: CouncilRunState,
   prompt: string,
   rounds: ModelCouncilRound[],
   candidateConsensus: string,
 ): Promise<ModelCouncilRatification[]> {
-  return Promise.all(
-    members.map(async (member) => {
-      const content = await askMember(member, buildRatificationMessages(prompt, rounds, candidateConsensus, member));
+  // WU-B3: unanimity is over survivors only — a member that fails to vote is
+  // dropped, and the run fails only if fewer than two survive. Each survivor's
+  // vote is checkpointed as it lands.
+  const results = await runMemberPhase(
+    state,
+    "ratification",
+    null,
+    async (member) => {
+      const content = await askMember(
+        member,
+        buildRatificationMessages(prompt, rounds, candidateConsensus, member),
+        state,
+        "ratification",
+        null,
+      );
       const vote = parseRatificationVote(content);
-      return {
+      const ratification: ModelCouncilRatification = {
         member: toMemberRef(member),
         content,
         accepted: vote.decision === "accept",
         vote,
       };
-    }),
+      return ratification;
+    },
+    (ratification) => ({ votes: ratification.vote }),
   );
+  return state.active.map((member) => results.get(member)!);
+}
+
+// --- WU-B2/B3/B4/B5 run orchestration ---------------------------------------
+//
+// A per-run accumulator: the shrinking survivor roster, the terminal-drop log, the
+// cost/latency ledger, the crash-insurance checkpoint path, and the resolved
+// per-member timeout. Threaded through every phase.
+type CouncilRunState = {
+  prompt: string;
+  members: ModelCouncilMember[];
+  active: ModelCouncilMember[];
+  dropped: CouncilDroppedMember[];
+  ledger: CouncilLedgerEntry[];
+  partialPath: string;
+  timeoutMs: number;
+};
+
+async function createRunState(prompt: string, members: ModelCouncilMember[]): Promise<CouncilRunState> {
+  const dir = resolveDeliberationsDir();
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  // A pid+random suffix keeps concurrent runs from colliding on one checkpoint
+  // path (the reconstructor globs `*.partial.jsonl`, so the exact name is free).
+  const suffix = `${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  const partialPath = path.join(dir, `council-${timestamp}-${suffix}.partial.jsonl`);
+  // Create the checkpoint up front (best-effort) so the mid-run existence check is
+  // deterministic and a crash before the first phase still leaves a marker.
+  try {
+    await mkdir(dir, { recursive: true });
+    await writeFile(partialPath, "", { flag: "w" });
+  } catch {
+    // Checkpointing is best-effort crash insurance — never fail the run over it.
+  }
+  return {
+    prompt,
+    members,
+    active: [...members],
+    dropped: [],
+    ledger: [],
+    partialPath,
+    timeoutMs: resolveMemberTimeoutMs(),
+  };
+}
+
+// WU-B3: run one phase over the surviving roster with Promise.allSettled. Each
+// survivor's result is checkpointed as it lands; a member that rejects is dropped
+// with its reason. The phase throws — losing quorum — only when a drop leaves
+// fewer than two survivors; a full-roster success (even a deliberately single-
+// member council) never trips the quorum guard.
+async function runMemberPhase<T>(
+  state: CouncilRunState,
+  phase: string,
+  round: number | null,
+  call: (member: ModelCouncilMember) => Promise<T>,
+  toCheckpointPayload?: (value: T) => { content?: string; votes?: RatificationVote },
+): Promise<Map<ModelCouncilMember, T>> {
+  const attempted = [...state.active];
+  const settled = await Promise.allSettled(attempted.map((member) => call(member)));
+  const results = new Map<ModelCouncilMember, T>();
+  let droppedThisPhase = 0;
+  for (let i = 0; i < attempted.length; i++) {
+    const member = attempted[i]!;
+    const outcome = settled[i]!;
+    if (outcome.status === "fulfilled") {
+      results.set(member, outcome.value);
+      const payload = toCheckpointPayload
+        ? toCheckpointPayload(outcome.value)
+        : { content: typeof outcome.value === "string" ? outcome.value : undefined };
+      await appendPartialLine(state, {
+        phase,
+        round,
+        member: member.name,
+        timestamp: new Date().toISOString(),
+        ...payload,
+      });
+    } else {
+      const reason = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
+      dropMember(state, member, phase, round, reason);
+      droppedThisPhase += 1;
+      await appendPartialLine(state, {
+        phase,
+        round,
+        member: member.name,
+        id: member.id,
+        timestamp: new Date().toISOString(),
+        reason,
+      });
+    }
+  }
+  if (droppedThisPhase > 0 && state.active.length < 2) {
+    throw quorumError(state, phase);
+  }
+  return results;
+}
+
+// WU-B3: remove a member from the surviving roster and log the terminal drop.
+function dropMember(
+  state: CouncilRunState,
+  member: ModelCouncilMember,
+  phase: string,
+  round: number | null,
+  reason: string,
+): void {
+  const index = state.active.indexOf(member);
+  if (index >= 0) {
+    state.active.splice(index, 1);
+  }
+  state.dropped.push({ id: member.id, phase, round, reason });
+}
+
+function memberNameFromId(members: ModelCouncilMember[], id: string): string {
+  return members.find((member) => member.id === id)?.name ?? id;
+}
+
+// WU-B3: the run lost quorum (fewer than two survivors after a drop). The message
+// names the survivors and every dropped member with its phase and reason, so a
+// single-member timeout surfaces "timed out after <ms>ms" all the way up.
+function quorumError(state: CouncilRunState, phase: string): Error {
+  const survivors = state.active.map((member) => member.name).join(", ") || "none";
+  const dropped = state.dropped
+    .map(
+      (drop) =>
+        `${memberNameFromId(state.members, drop.id)} [${drop.phase}${drop.round !== null ? ` r${drop.round}` : ""}]: ${drop.reason}`,
+    )
+    .join("; ");
+  return new Error(
+    `Council lost quorum during ${phase}: ${state.active.length} of ${state.members.length} members survived (survivors: ${survivors}; dropped: ${dropped}).`,
+  );
+}
+
+// WU-B2: append one crash-insurance line. Best-effort — a checkpoint IO failure
+// never fails the run.
+async function appendPartialLine(state: CouncilRunState, record: PartialPhaseRecord): Promise<void> {
+  try {
+    await appendFile(state.partialPath, `${JSON.stringify(record)}\n`, "utf8");
+  } catch {
+    // best-effort crash insurance
+  }
+}
+
+// WU-B2: the run completed — the checkpoint's crash insurance is no longer needed.
+async function finalizePartial(state: CouncilRunState): Promise<void> {
+  await rm(state.partialPath, { force: true }).catch(() => {});
+}
+
+// WU-B4: fold the per-call ledger into aggregate totals. Token totals stay null
+// unless at least one call reported the corresponding figure.
+function aggregateLedger(ledger: CouncilLedgerEntry[]): CouncilLedgerTotals {
+  const totals: CouncilLedgerTotals = {
+    calls: ledger.length,
+    wallMs: 0,
+    promptChars: 0,
+    responseChars: 0,
+    promptTokens: null,
+    completionTokens: null,
+    totalTokens: null,
+  };
+  for (const entry of ledger) {
+    totals.wallMs += entry.wallMs;
+    totals.promptChars += entry.promptChars;
+    totals.responseChars += entry.responseChars;
+    if (entry.usage) {
+      if (entry.usage.promptTokens !== null) {
+        totals.promptTokens = (totals.promptTokens ?? 0) + entry.usage.promptTokens;
+      }
+      if (entry.usage.completionTokens !== null) {
+        totals.completionTokens = (totals.completionTokens ?? 0) + entry.usage.completionTokens;
+      }
+      if (entry.usage.totalTokens !== null) {
+        totals.totalTokens = (totals.totalTokens ?? 0) + entry.usage.totalTokens;
+      }
+    }
+  }
+  return totals;
+}
+
+// WU-B5: estimate prompt tokens as chars/4 — deliberately crude; the precheck is
+// advisory only.
+function estimateTokens(chars: number): number {
+  return Math.ceil(chars / 4);
+}
+
+function memberContextBudget(member: ModelCouncilMember): number {
+  const override = readEnv(`${CONTEXT_TOKENS_ENV_PREFIX}${member.id.toUpperCase()}`);
+  if (override) {
+    const parsed = Number.parseInt(override, 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return DEFAULT_MEMBER_CONTEXT_TOKENS[member.id];
+}
+
+// WU-B5: before any spend, estimate each member's round-0 brief against its context
+// budget. Over budget -> a loud stderr warning naming the member. Under
+// AGENTS_COUNCIL_DROP_OVERSIZED=1 the oversized seat is additionally dropped
+// pre-spend (via the WU-B3 machinery, so the quorum guard still applies). Advisory
+// by default: an over-budget estimate never hard-fails the run.
+async function briefSizePrecheck(state: CouncilRunState, evidencePack: EvidencePackEntry[] | undefined): Promise<void> {
+  const dropRaw = readEnv(DROP_OVERSIZED_ENV);
+  const dropOversized = dropRaw === "1" || dropRaw?.toLowerCase() === "true";
+  const droppedForOversize: { member: ModelCouncilMember; reason: string }[] = [];
+  for (const member of [...state.active]) {
+    const messages = buildProposalMessages(state.prompt, member, evidencePack);
+    const chars = messages.reduce((total, message) => total + flattenMessageContent(message.content).length, 0);
+    const estimate = estimateTokens(chars);
+    const budget = memberContextBudget(member);
+    if (estimate <= budget) {
+      continue;
+    }
+    const reason = `oversized round-0 brief: estimated ${estimate} tokens exceeds the ${budget}-token context budget`;
+    process.stderr.write(
+      `WARNING: council member ${member.name} (${member.id}) has an ${reason}${
+        dropOversized
+          ? " — dropping the seat pre-spend (AGENTS_COUNCIL_DROP_OVERSIZED=1)."
+          : " (advisory only; set AGENTS_COUNCIL_DROP_OVERSIZED=1 to drop it)."
+      }\n`,
+    );
+    if (dropOversized) {
+      dropMember(state, member, "precheck", null, reason);
+      droppedForOversize.push({ member, reason });
+    }
+  }
+  for (const { member, reason } of droppedForOversize) {
+    await appendPartialLine(state, {
+      phase: "precheck",
+      round: null,
+      member: member.name,
+      id: member.id,
+      timestamp: new Date().toISOString(),
+      reason,
+    });
+  }
+  if (droppedForOversize.length > 0 && state.active.length < 2) {
+    throw quorumError(state, "precheck");
+  }
 }
 
 // FACTUAL_ERROR and MATERIAL_DISAGREEMENT are absolute vetoes (F7): unlike a
@@ -559,6 +956,7 @@ export function formatModelCouncilMarkdown(result: ModelCouncilResult): string {
     `- Initial proposals: ${result.responses.length}`,
     `- Deliberation rounds: ${result.rounds.length}`,
     `- Candidate converged: ${result.converged ? "yes" : "no"}`,
+    `- Degraded (member dropped mid-run): ${result.degraded ? "yes" : "no"}`,
     `- Peer ratifications: ${result.ratifications.length}`,
     `- Outcome: ${result.consensus.outcome}${result.consensus.notRatifiedReason ? ` (${result.consensus.notRatifiedReason})` : ""}`,
     `- Accepted by: ${result.consensus.ratifiedBy.join(", ") || "none"}`,
@@ -582,6 +980,24 @@ export function formatModelCouncilMarkdown(result: ModelCouncilResult): string {
     "## Initial Proposals",
     ...result.responses.flatMap((response) => ["", `### ${response.member.name}`, "", response.content]),
   ];
+
+  // WU-B3: surface any member dropped mid-run and why — the consensus was reached
+  // over the survivors only.
+  if (result.droppedMembers && result.droppedMembers.length > 0) {
+    lines.push(
+      "",
+      "## Dropped Members",
+      "",
+      "The following members were dropped mid-run; consensus was computed over the survivors only.",
+      "",
+      "| Member | Phase | Round | Reason |",
+      "| ------ | ----- | ----- | ------ |",
+      ...result.droppedMembers.map(
+        (drop) =>
+          `| ${memberNameFromId(result.members, drop.id)} | ${drop.phase} | ${drop.round ?? "—"} | ${drop.reason.replace(/\|/g, "\\|")} |`,
+      ),
+    );
+  }
 
   for (const round of result.rounds) {
     lines.push("", `## Deliberation Round ${round.index}${round.changed ? "" : " (no change)"}`);
@@ -626,6 +1042,63 @@ export function formatModelCouncilMarkdown(result: ModelCouncilResult): string {
     }
   } else {
     lines.push("", "Ratification skipped because the candidate consensus did not converge.");
+  }
+
+  // WU-B4: a short cost/latency totals table (per member+provider, plus a total
+  // row). Pure observation — nothing above reads the ledger.
+  if (result.ledger && result.ledger.length > 0 && result.ledgerTotals) {
+    const totals = result.ledgerTotals;
+    const byMember = new Map<
+      string,
+      {
+        member: string;
+        provider: string;
+        calls: number;
+        wallMs: number;
+        promptChars: number;
+        responseChars: number;
+        promptTokens: number | null;
+        completionTokens: number | null;
+      }
+    >();
+    for (const entry of result.ledger) {
+      const key = `${entry.member} ${entry.provider}`;
+      const row = byMember.get(key) ?? {
+        member: entry.member,
+        provider: entry.provider,
+        calls: 0,
+        wallMs: 0,
+        promptChars: 0,
+        responseChars: 0,
+        promptTokens: null,
+        completionTokens: null,
+      };
+      row.calls += 1;
+      row.wallMs += entry.wallMs;
+      row.promptChars += entry.promptChars;
+      row.responseChars += entry.responseChars;
+      if (entry.usage?.promptTokens != null) {
+        row.promptTokens = (row.promptTokens ?? 0) + entry.usage.promptTokens;
+      }
+      if (entry.usage?.completionTokens != null) {
+        row.completionTokens = (row.completionTokens ?? 0) + entry.usage.completionTokens;
+      }
+      byMember.set(key, row);
+    }
+    lines.push(
+      "",
+      "## Cost & Latency Ledger",
+      "",
+      `${totals.calls} provider call(s) · ${totals.wallMs} ms wall time · ${totals.promptChars} prompt chars · ${totals.responseChars} response chars.`,
+      "",
+      "| Member | Provider | Calls | Wall ms | Prompt chars | Response chars | Prompt tok | Completion tok |",
+      "| ------ | -------- | ----- | ------- | ------------ | -------------- | ---------- | -------------- |",
+      ...[...byMember.values()].map(
+        (row) =>
+          `| ${row.member} | ${row.provider} | ${row.calls} | ${row.wallMs} | ${row.promptChars} | ${row.responseChars} | ${row.promptTokens ?? "—"} | ${row.completionTokens ?? "—"} |`,
+      ),
+      `| **Total** | | ${totals.calls} | ${totals.wallMs} | ${totals.promptChars} | ${totals.responseChars} | ${totals.promptTokens ?? "—"} | ${totals.completionTokens ?? "—"} |`,
+    );
   }
 
   lines.push("");
@@ -753,7 +1226,17 @@ function buildStructuredTrace(
   };
 }
 
-export async function saveModelCouncilFailure(input: { prompt: string; error: string }): Promise<{
+// WU-B2: a failed run must not lose completed work. The enriched failure record
+// persists every proposal / deliberation round / partial ratification that landed
+// before the abort. The completed work comes from either an explicitly supplied
+// snapshot or — the CLI/MCP path, where only {prompt, error} is available — the
+// crash-insurance checkpoint runModelCouncil left behind, which is read and then
+// consumed here.
+export async function saveModelCouncilFailure(input: {
+  prompt: string;
+  error: string;
+  partial?: CouncilPartialSnapshot;
+}): Promise<{
   jsonPath: string;
   markdownPath: string;
 }> {
@@ -762,20 +1245,87 @@ export async function saveModelCouncilFailure(input: { prompt: string; error: st
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const jsonPath = path.join(deliberationsDir, `council-failed-${timestamp}.json`);
   const markdownPath = path.join(deliberationsDir, `council-failed-${timestamp}.md`);
+  const salvaged = input.partial ?? (await reconstructPartial(deliberationsDir));
   const failure: ModelCouncilFailure = {
     schema_version: "agents-council.model_council_failure.v1",
     generatedAt: new Date().toISOString(),
     prompt: input.prompt,
     error: input.error,
     members: buildDefaultMembers(),
+    ...(salvaged && salvaged.completedPhases.length > 0 ? { completedPhases: salvaged.completedPhases } : {}),
+    ...(salvaged && salvaged.droppedMembers.length > 0 ? { droppedMembers: salvaged.droppedMembers } : {}),
   };
   await writeFile(jsonPath, `${JSON.stringify(failure, null, 2)}\n`, "utf8");
   await writeFile(markdownPath, formatModelCouncilFailureMarkdown(failure), "utf8");
   return { jsonPath, markdownPath };
 }
 
+// WU-B2: read the newest leftover partial checkpoint (the one runModelCouncil left
+// on failure), split it into completed phases and drops, and consume the file so it
+// is not folded into a later failure record. Best-effort — missing/unreadable
+// checkpoints yield null.
+async function reconstructPartial(dir: string): Promise<CouncilPartialSnapshot | null> {
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return null;
+  }
+  const partials = entries.filter((name) => name.endsWith(".partial.jsonl"));
+  if (partials.length === 0) {
+    return null;
+  }
+  let newest: { file: string; mtimeMs: number } | null = null;
+  for (const file of partials) {
+    try {
+      const info = await stat(path.join(dir, file));
+      if (!newest || info.mtimeMs > newest.mtimeMs) {
+        newest = { file, mtimeMs: info.mtimeMs };
+      }
+    } catch {
+      // skip an entry that vanished between readdir and stat
+    }
+  }
+  if (!newest) {
+    return null;
+  }
+  const fullPath = path.join(dir, newest.file);
+  let text: string;
+  try {
+    text = await readFile(fullPath, "utf8");
+  } catch {
+    return null;
+  }
+  const completedPhases: PartialPhaseRecord[] = [];
+  const droppedMembers: CouncilDroppedMember[] = [];
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    let record: PartialPhaseRecord;
+    try {
+      record = JSON.parse(trimmed) as PartialPhaseRecord;
+    } catch {
+      continue;
+    }
+    if (record.reason !== undefined && record.content === undefined && record.votes === undefined) {
+      droppedMembers.push({
+        id: (record.id ?? "") as ModelCouncilMember["id"],
+        phase: record.phase,
+        round: record.round ?? null,
+        reason: record.reason,
+      });
+    } else {
+      completedPhases.push(record);
+    }
+  }
+  await rm(fullPath, { force: true }).catch(() => {});
+  return { completedPhases, droppedMembers };
+}
+
 function formatModelCouncilFailureMarkdown(failure: ModelCouncilFailure): string {
-  return [
+  const lines: string[] = [
     "# Council Failed",
     "",
     `_Generated ${failure.generatedAt}_`,
@@ -793,8 +1343,32 @@ function formatModelCouncilFailureMarkdown(failure: ModelCouncilFailure): string
     "## Question",
     "",
     failure.prompt || "(none)",
-    "",
-  ].join("\n");
+  ];
+  // WU-B3: clearly show any member dropped before the abort, and why.
+  if (failure.droppedMembers && failure.droppedMembers.length > 0) {
+    lines.push("", "## Dropped Members", "");
+    for (const drop of failure.droppedMembers) {
+      const name = memberNameFromId(failure.members, drop.id);
+      lines.push(`- **${name}** — ${drop.phase}${drop.round !== null ? ` (round ${drop.round})` : ""}: ${drop.reason}`);
+    }
+  }
+  // WU-B2: the salvaged completed work, so a failed run never silently loses it.
+  if (failure.completedPhases && failure.completedPhases.length > 0) {
+    lines.push(
+      "",
+      "## Completed Work (salvaged)",
+      "",
+      `${failure.completedPhases.length} completed member call(s) were recovered from the run checkpoint before the failure:`,
+      "",
+    );
+    for (const record of failure.completedPhases) {
+      const label = `${record.member ?? "(unknown)"} — ${record.phase}${record.round !== null ? ` (round ${record.round})` : ""}`;
+      const body = record.content ?? (record.votes ? `vote: ${record.votes.decision}` : "(no payload)");
+      lines.push(`### ${label}`, "", body, "");
+    }
+  }
+  lines.push("");
+  return lines.join("\n");
 }
 
 function validateCouncilConfig(members: ModelCouncilMember[]): void {
@@ -878,30 +1452,93 @@ function selectConfiguredMembers(members: ModelCouncilMember[]): ModelCouncilMem
   return selected;
 }
 
+// A provider reply: the text plus any usage the provider reported. Usage is null
+// on the paths that report none (Gemini CLI, the injected test asker).
+type MemberReply = { content: string; usage: CouncilTokenUsage | null };
+
+// WU-B1 test seam. Production never sets this — the setter is called only from the
+// test suite. When set, member calls route to it INSTEAD of the real provider
+// dispatch, still wrapped in the same per-member timeout, ledger, and checkpoint
+// machinery, so degradation / timeout / checkpoint / ledger behavior can be driven
+// deterministically without real provider CLIs (the "dependency-injected asker"
+// seam named in the lane contract).
+export type TestMemberAsker = (
+  member: ModelCouncilMember,
+  messages: ChatMessage[],
+  phase: string,
+  round: number | null,
+) => Promise<string>;
+let testMemberAsker: TestMemberAsker | null = null;
+export function __setTestMemberAsker(asker: TestMemberAsker | null): void {
+  testMemberAsker = asker;
+}
+
 // Per-call latency instrumentation, gated on AGENTS_COUNCIL_PERF_LOG. Pure
 // observability: logs to stderr only and never alters the prompt, control flow,
-// or return value. Used to measure the per-member/per-phase timeline (and prove
-// whether the within-phase Promise.all is truly parallel) before optimizing.
+// or return value. Since WU-B4 the same timing feeds the cost/latency ledger,
+// which is recorded on every successful call regardless of the flag.
 let perfBaseMs = 0;
-async function askMember(member: ModelCouncilMember, messages: ChatMessage[]): Promise<string> {
-  if (!readEnv("AGENTS_COUNCIL_PERF_LOG")) {
-    return dispatchMember(member, messages);
-  }
+async function askMember(
+  member: ModelCouncilMember,
+  messages: ChatMessage[],
+  state: CouncilRunState,
+  phase: string,
+  round: number | null,
+): Promise<string> {
+  const promptChars = messages.reduce((total, message) => total + flattenMessageContent(message.content).length, 0);
   const startMs = Date.now();
   if (perfBaseMs === 0) {
     perfBaseMs = startMs;
   }
+  let reply: MemberReply | undefined;
   try {
-    return await dispatchMember(member, messages);
+    reply = await produceReply(member, messages, state.timeoutMs, phase, round);
+    return reply.content;
   } finally {
     const endMs = Date.now();
-    process.stderr.write(
-      `PERF member=${member.name} provider=${member.provider} startMs=${startMs - perfBaseMs} endMs=${endMs - perfBaseMs} durMs=${endMs - startMs}\n`,
-    );
+    if (readEnv("AGENTS_COUNCIL_PERF_LOG")) {
+      process.stderr.write(
+        `PERF member=${member.name} provider=${member.provider} startMs=${startMs - perfBaseMs} endMs=${endMs - perfBaseMs} durMs=${endMs - startMs}\n`,
+      );
+    }
+    if (reply) {
+      // WU-B4: one ledger row per SUCCESSFUL call (a failed call produced no
+      // response to account for; its cost surfaces as a WU-B3 drop instead).
+      state.ledger.push({
+        member: member.name,
+        provider: member.provider,
+        phase,
+        round,
+        wallMs: endMs - startMs,
+        promptChars,
+        responseChars: reply.content.length,
+        usage: reply.usage,
+      });
+    }
   }
 }
 
-async function dispatchMember(member: ModelCouncilMember, messages: ChatMessage[]): Promise<string> {
+// Route one member call to its provider (or the injected test asker), applying the
+// WU-B1 per-member timeout where the provider lacks its own. The HTTP providers
+// (openrouter/moonshot/deepseek) already time out via the curl shim's `--max-time`
+// (driven by the same resolveMemberTimeoutMs), so they are not double-wrapped; the
+// SDK/CLI providers — which previously had NO timeout — and the injected asker are
+// wrapped in withMemberTimeout, which aborts the in-flight SDK call / kills the
+// subprocess so the loser cannot keep the process alive.
+async function produceReply(
+  member: ModelCouncilMember,
+  messages: ChatMessage[],
+  timeoutMs: number,
+  phase: string,
+  round: number | null,
+): Promise<MemberReply> {
+  if (testMemberAsker) {
+    const asker = testMemberAsker;
+    return withMemberTimeout(member, timeoutMs, async () => ({
+      content: await asker(member, messages, phase, round),
+      usage: null,
+    }));
+  }
   if (member.provider === "openrouter") {
     return askOpenRouter(member, messages);
   }
@@ -922,12 +1559,74 @@ async function dispatchMember(member: ModelCouncilMember, messages: ChatMessage[
     });
   }
   if (member.provider === "gemini") {
-    return askGemini(member, messages);
+    return withMemberTimeout(member, timeoutMs, (signal) => askGemini(member, messages, signal));
   }
   if (member.provider === "claude") {
-    return askClaude(member, messages);
+    return withMemberTimeout(member, timeoutMs, (signal) => askClaude(member, messages, signal));
   }
-  return askCodex(member, messages);
+  return withMemberTimeout(member, timeoutMs, (signal) => askCodex(member, messages, signal));
+}
+
+// WU-B1: race a member call against a real timeout. On timeout the AbortController
+// is tripped (so the wrapped provider can cancel its SDK call or kill its
+// subprocess) and the promise rejects with an error naming the member, provider,
+// and elapsed budget. Exported so the timeout contract is unit-testable without a
+// real provider.
+export async function withMemberTimeout<T>(
+  member: ModelCouncilMember,
+  timeoutMs: number,
+  run: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`${member.name} (${member.provider}) timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([run(controller.signal), timeout]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+// WU-B1: the per-member timeout governing EVERY provider. Precedence:
+// AGENTS_COUNCIL_MEMBER_TIMEOUT_MS > AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS (legacy
+// alias) > the 300s default. Exported so the precedence is directly testable.
+export function resolveMemberTimeoutMs(): number {
+  const raw = readEnv(MEMBER_TIMEOUT_ENV) ?? readEnv(OPENROUTER_TIMEOUT_ENV);
+  if (!raw) {
+    return DEFAULT_OPENROUTER_TIMEOUT_MS;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < MIN_OPENROUTER_TIMEOUT_MS) {
+    return DEFAULT_OPENROUTER_TIMEOUT_MS;
+  }
+  return parsed;
+}
+
+// WU-B4: normalize a provider's usage object across vendor field names into the
+// council's {promptTokens, completionTokens, totalTokens} shape. Returns null when
+// no recognizable token counts are present.
+function toTokenUsage(raw: unknown): CouncilTokenUsage | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  const num = (value: unknown): number | null => (typeof value === "number" && Number.isFinite(value) ? value : null);
+  const promptTokens = num(record.prompt_tokens) ?? num(record.input_tokens);
+  const completionTokens = num(record.completion_tokens) ?? num(record.output_tokens);
+  const totalTokens =
+    num(record.total_tokens) ??
+    (promptTokens !== null && completionTokens !== null ? promptTokens + completionTokens : null);
+  if (promptTokens === null && completionTokens === null && totalTokens === null) {
+    return null;
+  }
+  return { promptTokens, completionTokens, totalTokens };
 }
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -941,7 +1640,7 @@ type DirectChatProviderConfig = {
   defaultUrl: string;
 };
 
-async function askOpenRouter(member: ModelCouncilMember, messages: ChatMessage[]): Promise<string> {
+async function askOpenRouter(member: ModelCouncilMember, messages: ChatMessage[]): Promise<MemberReply> {
   const apiKey = readEnv("OPENROUTER_API_KEY");
   if (!apiKey) {
     throw new Error("OPENROUTER_API_KEY is required for the OpenRouter council members (Kimi, DeepSeek).");
@@ -957,7 +1656,9 @@ async function askOpenRouter(member: ModelCouncilMember, messages: ChatMessage[]
     headers["HTTP-Referer"] = referer;
   }
   const requestBody = JSON.stringify({ model: member.model, messages });
-  const timeoutMs = resolveOpenRouterTimeoutMs();
+  // WU-B1: the curl shim's `--max-time` is the OpenRouter timeout; it now honors
+  // the unified member-timeout env (with the OpenRouter alias) like every provider.
+  const timeoutMs = resolveMemberTimeoutMs();
   const url = readEnv(OPENROUTER_URL_ENV) ?? OPENROUTER_CHAT_COMPLETIONS_URL;
 
   let lastReason = "no content/reasoning returned";
@@ -1006,7 +1707,7 @@ async function askOpenRouter(member: ModelCouncilMember, messages: ChatMessage[]
     const choice = body?.choices?.[0];
     const text = extractOpenRouterText(choice);
     if (text) {
-      return text;
+      return { content: text, usage: toTokenUsage(body?.usage) };
     }
 
     // 200 with no usable content/reasoning is usually a transient provider
@@ -1032,7 +1733,7 @@ async function askDirectChatProvider(
   member: ModelCouncilMember,
   messages: ChatMessage[],
   config: DirectChatProviderConfig,
-): Promise<string> {
+): Promise<MemberReply> {
   const apiKey = readEnv(config.apiKeyEnv);
   if (!apiKey) {
     throw new Error(`${config.apiKeyEnv} is required for ${member.name}.`);
@@ -1043,7 +1744,9 @@ async function askDirectChatProvider(
     "Content-Type": "application/json",
   };
   const requestBody = JSON.stringify({ model: member.model, messages });
-  const timeoutMs = resolveOpenRouterTimeoutMs();
+  // WU-B1: unified member timeout (with the OpenRouter alias) governs the curl
+  // shim's `--max-time` for the direct vendor providers too.
+  const timeoutMs = resolveMemberTimeoutMs();
   const url = readEnv(config.urlEnv) ?? config.defaultUrl;
 
   let lastReason = "no content/reasoning returned";
@@ -1092,7 +1795,7 @@ async function askDirectChatProvider(
     const choice = body?.choices?.[0];
     const text = extractOpenRouterText(choice);
     if (text) {
-      return text;
+      return { content: text, usage: toTokenUsage(body?.usage) };
     }
 
     const finishReason = choice?.finish_reason ? `finish_reason=${choice.finish_reason}` : null;
@@ -1254,7 +1957,11 @@ export function resolveOpenRouterTimeoutMs(): number {
 
 const GEMINI_MAX_ATTEMPTS = 3;
 
-async function askGemini(member: ModelCouncilMember, messages: ChatMessage[]): Promise<string> {
+async function askGemini(
+  member: ModelCouncilMember,
+  messages: ChatMessage[],
+  signal?: AbortSignal,
+): Promise<MemberReply> {
   const geminiPath = await getGeminiExecutablePath();
   if (!geminiPath) {
     throw new Error(
@@ -1278,23 +1985,45 @@ async function askGemini(member: ModelCouncilMember, messages: ChatMessage[]): P
 
   let lastReason = "no output";
   for (let attempt = 1; attempt <= GEMINI_MAX_ATTEMPTS; attempt++) {
+    // WU-B1: if the outer member timeout already fired, stop before spawning
+    // another CLI so a timed-out Gemini call cannot keep spawning subprocesses.
+    if (signal?.aborted) {
+      throw new Error(`${member.name} Gemini CLI aborted before attempt ${attempt}.`);
+    }
     const proc = Bun.spawn([geminiPath, "-m", member.model], {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
     });
-    proc.stdin.write(prompt);
-    await proc.stdin.end();
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
+    // WU-B1: on timeout, kill the in-flight subprocess so the loser cannot keep
+    // the process alive.
+    const onAbort = () => {
+      try {
+        proc.kill();
+      } catch {
+        // already exited
+      }
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    let stdout: string;
+    let stderr: string;
+    let exitCode: number;
+    try {
+      proc.stdin.write(prompt);
+      await proc.stdin.end();
+      [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
 
     if (exitCode === 0) {
       const content = stdout.trim();
       if (content) {
-        return content;
+        return { content, usage: null };
       }
       lastReason = "exit 0 with empty stdout";
     } else {
@@ -1313,7 +2042,11 @@ async function askGemini(member: ModelCouncilMember, messages: ChatMessage[]): P
   throw new Error(`${member.name} Gemini CLI failed (${lastReason}).`);
 }
 
-async function askCodex(member: ModelCouncilMember, messages: ChatMessage[]): Promise<string> {
+async function askCodex(
+  member: ModelCouncilMember,
+  messages: ChatMessage[],
+  signal?: AbortSignal,
+): Promise<MemberReply> {
   const codexPath = await getCodexExecutablePath();
   const codex = codexPath ? new Codex({ codexPathOverride: codexPath }) : new Codex();
   const thread = codex.startThread({
@@ -1330,16 +2063,22 @@ async function askCodex(member: ModelCouncilMember, messages: ChatMessage[]): Pr
   const prompt = messages
     .map((message) => `${message.role.toUpperCase()}: ${flattenMessageContent(message.content)}`)
     .join("\n\n");
-  const turn = await thread.run(prompt);
+  // WU-B1: the Codex SDK cancels the turn on the AbortSignal, so the member
+  // timeout stops the in-flight turn rather than leaving it running.
+  const turn = await thread.run(prompt, signal ? { signal } : undefined);
   const content = normalizeOptionalString(turn.finalResponse);
   if (!content) {
     throw new Error(`${member.name} returned an empty Codex response.`);
   }
 
-  return content;
+  return { content, usage: toTokenUsage(turn.usage) };
 }
 
-async function askClaude(member: ModelCouncilMember, messages: ChatMessage[]): Promise<string> {
+async function askClaude(
+  member: ModelCouncilMember,
+  messages: ChatMessage[],
+  signal?: AbortSignal,
+): Promise<MemberReply> {
   const claudeCodePath = await getClaudeCodeExecutablePath();
   // Council members reason and reply with text only; every tool call is denied
   // by canUseTool below. Tell the member that UP FRONT — otherwise a file-path-
@@ -1353,6 +2092,17 @@ async function askClaude(member: ModelCouncilMember, messages: ChatMessage[]): P
     messages.map((message) => `${message.role.toUpperCase()}: ${flattenMessageContent(message.content)}`).join("\n\n"),
   ].join("\n\n");
 
+  // WU-B1: the Claude Agent SDK aborts the query on this controller, so the
+  // member timeout cancels the in-flight agent loop instead of leaking it.
+  const abortController = new AbortController();
+  if (signal) {
+    if (signal.aborted) {
+      abortController.abort();
+    } else {
+      signal.addEventListener("abort", () => abortController.abort(), { once: true });
+    }
+  }
+
   const response = query({
     prompt,
     options: {
@@ -1360,6 +2110,7 @@ async function askClaude(member: ModelCouncilMember, messages: ChatMessage[]): P
       model: member.model,
       permissionMode: "default",
       settingSources: ["user"],
+      abortController,
       // Council members reason and reply with text only; deny every tool so the
       // member produces a direct response instead of acting on the workspace.
       canUseTool: async () => ({
@@ -1372,6 +2123,7 @@ async function askClaude(member: ModelCouncilMember, messages: ChatMessage[]): P
 
   let finalText: string | null = null;
   let resultError: string | null = null;
+  let usage: CouncilTokenUsage | null = null;
   for await (const message of response) {
     if (message.type !== "result") {
       continue;
@@ -1382,6 +2134,7 @@ async function askClaude(member: ModelCouncilMember, messages: ChatMessage[]): P
       result?: unknown;
       error?: unknown;
       errors?: string[];
+      usage?: unknown;
     };
     if (result.is_error || (result.subtype && result.subtype !== "success")) {
       resultError =
@@ -1391,6 +2144,7 @@ async function askClaude(member: ModelCouncilMember, messages: ChatMessage[]): P
         "Claude council member failed.";
     } else {
       finalText = normalizeOptionalString(result.result);
+      usage = toTokenUsage(result.usage);
     }
   }
 
@@ -1402,7 +2156,7 @@ async function askClaude(member: ModelCouncilMember, messages: ChatMessage[]): P
     throw new Error(`${member.name} returned an empty Claude response.`);
   }
 
-  return content;
+  return { content, usage };
 }
 
 export function buildProposalMessages(

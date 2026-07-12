@@ -32,6 +32,95 @@
 <p class="sub">A running log of decisions not in the original ask, changes, tradeoffs, and things to know.
 Maintained across the build-out of the multi-model autonomous council. Newest section first.</p>
 
+<h2>Session 2026-07-12 — Lane B: resilience + run economics (<code>modelCouncil.ts</code>)</h2>
+
+<p class="sub">Hardened <code>runModelCouncil</code> against the failure modes that historically lost a whole run's completed work
+(member timeouts, content-policy rejections, provider-CLI exit-1). Five features: B1 per-member timeouts on every provider,
+B2 never-lose-completed-work, B3 member-drop degradation with survivor quorum, B4 per-call cost/latency ledger, B5 advisory
+brief-size precheck. All in <code>src/core/services/modelCouncil.ts</code> + a new <code>modelCouncil.resilience.test.ts</code>
+(9 tests) + <code>docs/council.md</code>. Baseline 121 tests stayed green; total 130 pass.</p>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span> Added a test-only asker injection seam (<code>__setTestMemberAsker</code>)</h3>
+  <div class="meta">2026-07-12 · this is the "dependency-injected asker" the lane contract names as an existing seam</div>
+  <p>The required B3/B1/B2 tests need per-member deterministic control across an arbitrary roster (a member that hangs, one that
+  rejects mid-deliberation, an asker that inspects the fs). The established <code>AGENTS_COUNCIL_OPENROUTER_URL</code> mock only
+  reaches HTTP providers, of which there are just two member ids (kimi, deepseek) — it cannot express a 3-member degradation with
+  distinct providers. So <code>askMember</code> consults a module-level override, set only from the test suite and reset to
+  <code>null</code> in <code>afterEach</code>. Injected calls still flow through the real timeout + ledger + checkpoint
+  machinery.</p>
+  <p class="why"><b>Why it matters:</b> it is the only way to exercise the spec's exact degradation/timeout/checkpoint contracts
+  deterministically without real Claude/Codex/Gemini CLIs.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span> HTTP providers keep their curl <code>--max-time</code> timeout; only SDK/CLI + injected paths get <code>withMemberTimeout</code></h3>
+  <div class="meta">2026-07-12 · B1</div>
+  <p>Every provider is now governed by <code>AGENTS_COUNCIL_MEMBER_TIMEOUT_MS</code> (legacy alias
+  <code>AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS</code>, precedence member&nbsp;&gt;&nbsp;alias&nbsp;&gt;&nbsp;300s). The curl shim
+  already enforces a real, self-killing timeout, so the HTTP members read the unified env into <code>--max-time</code> rather than
+  being double-wrapped. The SDK/CLI members — which had <b>no</b> timeout — are wrapped in an <code>AbortController</code>/
+  <code>Promise.race</code> guard that aborts the SDK call (Claude <code>abortController</code>, Codex <code>signal</code>) or kills
+  the Gemini subprocess so the loser can't keep the process alive.</p>
+  <p class="why"><b>Why it matters:</b> double-wrapping the curl path at a sub-second member timeout would preempt curl's own
+  1s-granularity body-read timeout and break the two existing OpenRouter-timeout tests (which assert the exact
+  "…before complete response body" message). Not wrapping them keeps those tests byte-identical.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span> B2 failure enrichment reconstructs completed work from the partial checkpoint, not from a passed-in result</h3>
+  <div class="meta">2026-07-12 · B2 · scope confined to modelCouncil.ts (CLI/MCP untouched)</div>
+  <p>The CLI/MCP catch blocks call <code>saveModelCouncilFailure({prompt, error})</code> — they never had the partial state, and
+  the lane scope forbids touching them. So <code>runModelCouncil</code> writes each completed member call (and each drop) as a JSON
+  line to <code>deliberations/council-&lt;ts&gt;.partial.jsonl</code> as it goes, removes it on success, and leaves it on failure;
+  <code>saveModelCouncilFailure</code> reads the newest leftover checkpoint, folds the completed phases + drops into the failure
+  record, and consumes it. An explicit <code>partial</code> arg still takes precedence for direct callers.</p>
+  <p class="why"><b>Why it matters:</b> this is what makes the enriched failure record real on the production CLI path without
+  editing any file outside <code>modelCouncil.ts</code>.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span> Quorum guard fires only after a drop</h3>
+  <div class="meta">2026-07-12 · B3</div>
+  <p>"&lt;2 survivors → fail" is checked only when a member actually dropped in the phase. A deliberately single-member roster
+  (e.g. <code>AGENTS_COUNCIL_MEMBERS=kimi</code>, used by several existing tests) that succeeds must not trip the guard.</p>
+  <p class="why"><b>Why it matters:</b> a naive "active&lt;2 ⇒ throw" broke the existing single-member repair/precondition tests.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Off-spec</span> Kept <code>ModelCouncilFailure.schema_version</code> at v1; partial filename carries a uniqueness suffix; checkpoint also logs drop lines</h3>
+  <div class="meta">2026-07-12 · B2 · minor, additive deviations</div>
+  <p>(1) The failure record gains optional <code>completedPhases</code>/<code>droppedMembers</code> but stays
+  <code>agents-council.model_council_failure.v1</code> — additive/optional fields, and the existing test pins v1. (2) The
+  checkpoint is <code>council-&lt;ts&gt;-&lt;pid&gt;-&lt;rand&gt;.partial.jsonl</code>, not the literal <code>council-&lt;ts&gt;</code>,
+  for concurrent-run collision safety; the reconstructor globs <code>*.partial.jsonl</code> so the exact name is free. (3) The jsonl
+  carries drop lines (<code>{phase,round,member,id,reason}</code>) in addition to the spec's <code>{…,content|votes}</code> completed
+  lines, so <code>droppedMembers</code> reconstructs from the same file.</p>
+  <p class="why"><b>Why it matters:</b> each keeps a spec contract intact (test compatibility, crash safety, single-file recovery)
+  at the cost of a literal reading of the format string.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Off-spec</span> New result fields are optional; ledger records only successful calls</h3>
+  <div class="meta">2026-07-12 · B3/B4</div>
+  <p><code>degraded</code>, <code>droppedMembers</code>, <code>ledger</code>, <code>ledgerTotals</code> are optional on
+  <code>ModelCouncilResult</code> so the ~6 hand-built result fixtures in the existing tests still typecheck. A failed provider call
+  produces no ledger row (its cost surfaces as a B3 drop instead); the ledger accounts responses that exist.</p>
+  <p class="why"><b>Why it matters:</b> surgical — avoids rewriting unrelated existing test fixtures.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span> <code>runModelCouncil</code> now performs (best-effort) disk IO; usage tokens captured where the API reports them</h3>
+  <div class="meta">2026-07-12 · FYI</div>
+  <p>Previously in-memory only, <code>runModelCouncil</code> now writes the partial checkpoint to the gitignored
+  <code>deliberations/</code> dir (B2 requirement). All checkpoint IO is best-effort — a write failure never fails the run. Usage
+  tokens are captured from OpenRouter/Moonshot/DeepSeek (<code>body.usage</code>), Codex (<code>turn.usage</code>), and Claude
+  (<code>result.usage</code>) via one tolerant field-name mapper; Gemini CLI and the injected asker report <code>null</code>. The
+  curl shim's bearer-token hygiene (0600 <code>wx</code> config file, never argv) is untouched.</p>
+  <p class="why"><b>Why it matters:</b> the disk side-effect is a genuine behavior change to flag; the bearer-token invariant was
+  the lane's stated hard constraint and did not regress.</p>
+</div>
+
 <h2>Session 2026-06-23 — Borrow bb's anti-polling primitive: <code>wait_for_session_data</code> MCP tool</h2>
 
 <p class="sub">After evaluating <code>ymichael/bb</code> (a competing agent-IDE) the user asked to apply its patterns here.

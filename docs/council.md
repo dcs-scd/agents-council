@@ -498,6 +498,11 @@ top-level enum.
 |---|---|
 | `AGENTS_COUNCIL_STRUCTURED` | Opt-in (default OFF) for the entire structured path above: typed schemas, provenance/source-ID preconditions, `trace-{ts}.json`, and `issue-map-{ts}.json`. Flag-off is byte-for-byte legacy. |
 | `AGENTS_COUNCIL_MEMBERS` | Comma-separated member-id list that overrides the odd≥3 default roster, resolving to exactly those members (e.g. a two-id list yields the cheap n=2 draft). |
+| `AGENTS_COUNCIL_MEMBER_TIMEOUT_MS` | Per-member call timeout (ms, default `300000`, floor `50`) governing **every** provider path — the SDK/CLI members (Claude/Codex/Gemini) that previously had none, and the curl-based HTTP members. On timeout the member is dropped (see degradation below). |
+| `AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS` | Legacy alias for the member timeout, still honored. Precedence: `AGENTS_COUNCIL_MEMBER_TIMEOUT_MS` > `AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS` > default. |
+| `AGENTS_COUNCIL_DROP_OVERSIZED` | When `1`/`true`, a member whose round-0 brief is estimated over its context budget is dropped **pre-spend** (recorded as a drop) instead of only warned about. Advisory-only by default. |
+| `AGENTS_COUNCIL_CONTEXT_TOKENS_<ID>` | Per-member context budget (tokens) for the brief-size precheck, where `<ID>` is the uppercased member id (e.g. `AGENTS_COUNCIL_CONTEXT_TOKENS_KIMI`). Falls back to a deliberately conservative built-in default per member. |
+| `AGENTS_COUNCIL_PERF_LOG` | When set, emits a per-call `PERF …` line to stderr. Subsumed by the always-recorded cost/latency ledger (below); the flag still controls the stderr echo. |
 
 ### Graduation gate (Wave C)
 
@@ -513,6 +518,66 @@ On failure, the issue map is downgraded to audit-only, the F3 self-report and th
 label gate are kept, and graduation stops. Wave C is recorded as deferred work in
 `docs/implementation/council-claim-ledger-delphi/work-units.md` and is **not** part of the
 shipped Wave A+B build.
+
+## Resilience and run economics
+
+`runModelCouncil` is hardened against the failure modes that historically lost a
+whole run's completed work (a member timing out, hitting a content policy, or the
+provider CLI exiting non-zero). These behaviors are always on and independent of
+`AGENTS_COUNCIL_STRUCTURED`.
+
+### Per-member timeouts (every provider)
+
+Every member call is bounded by `AGENTS_COUNCIL_MEMBER_TIMEOUT_MS` (default 300s,
+legacy alias `AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS`). The HTTP members keep timing
+out through the curl shim's `--max-time`; the SDK/CLI members — which previously had
+**no** timeout — are wrapped in an `AbortController`/`Promise.race` guard that
+cancels the in-flight SDK call (Claude `abortController`, Codex `signal`) or kills
+the subprocess (Gemini CLI), so a timed-out call can never keep the process alive.
+A timeout error names the member, provider, and elapsed budget.
+
+### Member-drop degradation with survivor quorum
+
+Each phase runs over the surviving roster with `Promise.allSettled`. When a member
+fails terminally (after the provider's own retries/timeout):
+
+- **≥2 survivors** — the member is dropped for the rest of the run and the council
+  continues. The result carries `degraded: true` and a `droppedMembers[]` of
+  `{ id, phase, round, reason }`. Ratification unanimity is computed over survivors
+  only, and if the chair (`members[0]`) drops, chair duties fall to the next
+  survivor.
+- **<2 survivors** — the run fails (with the enriched failure record below).
+
+The saved Markdown shows a **Dropped Members** table with the phase and reason.
+
+### Never lose completed work
+
+- The failure record (`council-failed-{ts}.json/.md`) persists every completed
+  proposal, deliberation round, and partial ratification available at failure time,
+  not just `{prompt, error, members}`.
+- As the run progresses, each completed member call (and each drop) is appended as
+  one JSON line to `deliberations/council-{ts}.partial.jsonl` — crash/kill
+  insurance. The file is removed on successful completion; on failure it is left in
+  place and `saveModelCouncilFailure` reconstructs the completed work from the newest
+  such checkpoint (then consumes it).
+
+### Cost/latency ledger
+
+Every successful provider call records a `ledger[]` row
+(`{ member, provider, phase, round, wallMs, promptChars, responseChars, usage }`,
+usage tokens where the API reports them, else null) plus aggregate `ledgerTotals`
+on the result JSON, and a short totals table in the saved Markdown. Pure
+observation — no control flow reads the ledger. `AGENTS_COUNCIL_PERF_LOG` still
+echoes the per-call `PERF …` line to stderr.
+
+### Brief-size precheck (advisory)
+
+Before round 0, each member's proposal brief is estimated (chars/4) against a
+per-member context budget (`AGENTS_COUNCIL_CONTEXT_TOKENS_<ID>`, else a conservative
+built-in default). An over-budget estimate emits a loud stderr warning naming the
+member; it drops the seat pre-spend only under `AGENTS_COUNCIL_DROP_OVERSIZED=1`
+(recorded via the degradation machinery). It never hard-fails the run on an
+estimate alone.
 
 ## SDK Requirement
 
