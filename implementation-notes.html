@@ -32,6 +32,41 @@
 <p class="sub">A running log of decisions not in the original ask, changes, tradeoffs, and things to know.
 Maintained across the build-out of the multi-model autonomous council. Newest section first.</p>
 
+<h2>Session 2026-07-12 — Integration: Lane A &times; Lane B semantic merge</h2>
+
+<p class="sub">Reconciliation of the two concurrent <code>modelCouncil.ts</code> rewrites on
+<code>council-hardening-integration</code>. Gates after merge: typecheck clean, 158 pass / 0 fail.</p>
+
+<div class="entry">
+  <span class="ts">2026-07-12 23:05</span> <span class="tag DECISION">DECISION</span>
+  <p>All chair duties — repair synthesis AND the A1 fold — follow the surviving roster
+  (<code>state.active[0]</code>), not the original <code>members[0]</code>. The fold call is routed through the
+  5-arg <code>askMember</code> under a new ledger phase name <code>"fold"</code>, so fold cost/latency is accounted
+  and the fold respects the member timeout.</p>
+  <p class="why">Why: Lane A wrote the fold pre-merge against the old 2-arg asker; leaving it un-ledgered and
+  chaired by a possibly-dropped member would contradict Lane B's B3/B4 semantics.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-07-12 23:05</span> <span class="tag DECISION">DECISION</span>
+  <p>The deliberation phase composes both lanes: <code>runMemberPhase</code> (B3 drops + B2 checkpointing)
+  wraps <code>askDeliberation</code> (A4 re-ask-once), which now threads <code>state</code> so both the first ask and
+  the protocol re-ask are timed out, ledgered, and checkpointed. Unanimity and consensus construction run over
+  survivors (<code>state.active</code>), including <code>buildConsensusResult</code>.</p>
+  <p class="why">Why: the union is the only composition that preserves each lane's tested contract; every
+  A-test and B-test passes unmodified post-merge.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-07-12 23:05</span> <span class="tag FYI">FYI</span>
+  <p>Lane C's two CLI happy-path tests (1-member <code>kimi</code> roster against the mock) now set
+  <code>AGENTS_COUNCIL_ALLOW_SOLO=1</code> — the A2 quorum guard landed after Lane C wrote them. Same
+  treatment Lane A applied to the five pre-existing single-member tests. Also verified at merge:
+  bearer-token hygiene unchanged (headers only in the 0600 <code>wx</code> curl config, never argv), and
+  <code>councilOutcomeExitCode</code> maps <code>ratified_with_edits</code> → 0 as the Lane C docs assert.</p>
+  <p class="why">Why: cross-lane interactions Lane C explicitly flagged for post-merge re-check.</p>
+</div>
+
 <h2>Session 2026-07-12 — Lane C: <code>council solve</code> CLI surface + staged skill-wrapper rewrites</h2>
 
 <p class="sub">Council-hardening build, Lane C (drift-class elimination). Added file/roster/banner to the
