@@ -291,6 +291,24 @@ export type PeerLabel = {
   member: MemberRef;
 };
 
+// D3: one member's structured-parse accrual for a phase, kept on the run state and
+// persisted (flag-on only) on the result and inside trace-{ts}.json. "ok" = a
+// schema-valid payload was used; "fail" = a payload was present but invalid (JSON
+// or schema) and the legacy parse was used; "absent" = the reply carried no payload
+// (the member ignored the instruction) and the legacy parse was used. From N saved
+// traces the operator computes the <5% promotion criterion (docs/council.md,
+// Graduation gate) as fail / (ok + fail) — "absent" is tracked separately because
+// ignoring the instruction is protocol noncompliance, not a parse failure.
+export type StructuredParseOutcome = "ok" | "fail" | "absent";
+
+export type StructuredParseStat = {
+  member: string;
+  phase: "deliberation" | "ratification";
+  ok: number;
+  fail: number;
+  absent: number;
+};
+
 export type ModelCouncilResult = {
   prompt: string;
   members: ModelCouncilMember[];
@@ -325,6 +343,10 @@ export type ModelCouncilResult = {
   solo?: boolean;
   // A3: the anonymous-label -> member map used in mid-run prompts (roster order).
   peerLabels?: PeerLabel[];
+  // D3: per-member/per-phase structured parse accrual. Present only when the
+  // AGENTS_COUNCIL_STRUCTURED run recorded at least one outcome; never present
+  // flag-off, so the legacy result JSON is unchanged.
+  structuredParseStats?: StructuredParseStat[];
 };
 
 // WU-B3: the record of one member dropped terminally mid-run. `round` is null for
@@ -581,7 +603,9 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
     rounds.push(round);
     candidateConsensus = nextCandidateConsensus;
     previousProposals = proposals;
-    if (isConverged(round) && candidateConsensus.trim().length > 0) {
+    // D2: under the flag, isConverged reads the structured (payload) convergence
+    // signals; flag off the second argument is undefined and nothing changes.
+    if (isConverged(round, await structuredRoundSignals(round)) && candidateConsensus.trim().length > 0) {
       break;
     }
   }
@@ -589,7 +613,11 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
   const finalRound = rounds.at(-1);
   const deliberations = finalRound?.proposals ?? [];
   // Telemetry only: did an early-stop arm fire? It no longer gates ratification.
-  const converged = Boolean(finalRound && isConverged(finalRound) && candidateConsensus.trim().length > 0);
+  const converged = Boolean(
+    finalRound &&
+      isConverged(finalRound, await structuredRoundSignals(finalRound)) &&
+      candidateConsensus.trim().length > 0,
+  );
 
   // F2: ratify whenever a non-empty candidate exists, NOT only when the Jaccard
   // convergence gate fired. Verbose reasoners agree on substance without producing
@@ -713,6 +741,9 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
     ledgerTotals: aggregateLedger(state.ledger),
     ...(solo ? { solo: true } : {}),
     peerLabels,
+    // D3: flag-on only — a flag-off run records nothing, so the field is absent
+    // and the legacy result/JSON stays byte-identical.
+    ...(state.parseStats.length > 0 ? { structuredParseStats: state.parseStats } : {}),
   };
   // WU-B2: the run completed — the checkpoint's crash insurance is no longer
   // needed, so remove it. (A thrown failure above leaves it in place for the
@@ -746,7 +777,10 @@ async function ratifyCandidate(
         "ratification",
         null,
       );
-      const vote = parseRatificationVote(content);
+      // D2: the structured wrapper (falls back to the legacy marker parse; flag
+      // off it IS the legacy parse). D3: the parse outcome accrues to the run's
+      // per-member/per-phase stats — never recorded flag-off.
+      const vote = await parseRatificationVoteStructured(content, recordStructuredParse(state, member, "ratification"));
       const ratification: ModelCouncilRatification = {
         member: toMemberRef(member),
         content,
@@ -773,6 +807,9 @@ type CouncilRunState = {
   ledger: CouncilLedgerEntry[];
   partialPath: string;
   timeoutMs: number;
+  // D3: per-member/per-phase structured parse accrual. Only the flag-on wrapper
+  // paths ever record into it, so a flag-off run leaves it empty.
+  parseStats: StructuredParseStat[];
 };
 
 async function createRunState(prompt: string, members: ModelCouncilMember[]): Promise<CouncilRunState> {
@@ -798,6 +835,7 @@ async function createRunState(prompt: string, members: ModelCouncilMember[]): Pr
     ledger: [],
     partialPath,
     timeoutMs: resolveMemberTimeoutMs(),
+    parseStats: [],
   };
 }
 
@@ -999,9 +1037,12 @@ async function briefSizePrecheck(state: CouncilRunState, evidencePack: EvidenceP
 // A reply that omits the required CANDIDATE_CONSENSUS marker is NOT a candidate
 // draft — the member is re-asked ONCE to resend in protocol format; if it is still
 // markerless it contributes no draft this round (recorded protocolNoncompliant).
-// The structured (AGENTS_COUNCIL_STRUCTURED) path is exempt: there the member emits
-// a JSON payload whose candidate is not carried by the text marker, so the marker's
-// absence is not non-compliance and the raw payload stands (legacy structured behavior).
+// The structured (AGENTS_COUNCIL_STRUCTURED) path is exempt: there the candidate
+// rides the JSON payload rather than the text marker, so the marker's absence is
+// not non-compliance and there is no re-ask. D2: under the flag the candidate is
+// read through the structured wrapper — a schema-valid payload wins, and the
+// wrapper falls back to the legacy marker, then to the raw reply (the pre-D2
+// structured behavior). D3: the parse outcome accrues to the run's stats.
 async function askDeliberation(
   member: ModelCouncilMember,
   messages: ChatMessage[],
@@ -1009,12 +1050,16 @@ async function askDeliberation(
   round: number | null,
 ): Promise<ModelCouncilCandidateProposal> {
   const content = await askMember(member, messages, state, "deliberation", round);
+  if (isStructuredCouncilEnabled()) {
+    const candidate = await parseCandidateConsensusStructured(
+      content,
+      recordStructuredParse(state, member, "deliberation"),
+    );
+    return { member: toMemberRef(member), content, candidateConsensus: candidate };
+  }
   const parsed = parseCandidateConsensus(content);
   if (parsed !== null) {
     return { member: toMemberRef(member), content, candidateConsensus: parsed };
-  }
-  if (isStructuredCouncilEnabled()) {
-    return { member: toMemberRef(member), content, candidateConsensus: content.trim() };
   }
   const resendContent = await askMember(member, appendProtocolResendNote(messages), state, "deliberation", round);
   const resendParsed = parseCandidateConsensus(resendContent);
@@ -1402,7 +1447,11 @@ async function extractStructuredClaims(result: ModelCouncilResult): Promise<Stru
   const out: StructuredClaim[] = [];
   for (const round of result.rounds) {
     for (const proposal of round.proposals) {
-      const parsed = parseStructuredOrFallback(proposal.content, DeliberationResponseSchema, () => null);
+      // D1: the payload rides a fenced ```json block alongside the legacy markers
+      // (or the reply is bare JSON, the pre-D1 shape) — extract it before parsing.
+      const payload = extractStructuredPayload(proposal.content);
+      const parsed =
+        payload === null ? null : parseStructuredOrFallback(payload, DeliberationResponseSchema, () => null);
       if (parsed === null || typeof parsed === "string" || !("claims" in parsed)) {
         continue;
       }
@@ -1440,6 +1489,7 @@ function buildStructuredTrace(
   converged: boolean;
   candidateConsensus: string;
   claims: StructuredClaim[];
+  parseStats: StructuredParseStat[];
 } {
   return {
     schema_version: "agents-council.council_trace.v1",
@@ -1455,6 +1505,12 @@ function buildStructuredTrace(
     converged: result.converged,
     candidateConsensus: result.candidateConsensus,
     claims,
+    // D3: per-member/per-phase structured parse accrual (ok/fail/absent), additive
+    // to the v1 trace contract (council_to_brief.py reads only its required top
+    // keys). Sorted for a deterministic artifact — phase completion order is not.
+    parseStats: [...(result.structuredParseStats ?? [])].sort(
+      (a, b) => a.member.localeCompare(b.member) || a.phase.localeCompare(b.phase),
+    ),
   };
 }
 
@@ -2457,6 +2513,29 @@ function formatEvidencePack(evidencePack: EvidencePackEntry[]): string {
   return `Evidence pack (cite entries by their [id] when you rely on them):\n${entries}`;
 }
 
+// D1: flag-gated structured-payload requests, appended to the deliberation and
+// ratification system prompts ONLY under AGENTS_COUNCIL_STRUCTURED — flag off the
+// prompts are byte-identical to legacy. The payload is ADDITIVE: the legacy
+// human-readable markers stay required, so a member that ignores the fence
+// degrades gracefully to the legacy text path. The shapes mirror the zod schemas
+// in src/core/services/council/schemas.ts; peers are referenced only by their
+// anonymized labels, never by a real identity.
+const STRUCTURED_DELIBERATION_INSTRUCTION = [
+  "Additionally, after the CANDIDATE_CONSENSUS: section, repeat your position as a structured payload in a fenced ```json code block, matching exactly this shape:",
+  "```json",
+  '{ "candidateConsensus": "<the exact candidate consensus text>", "claims": [{ "id": "c1", "text": "<one factual claim backing the candidate>", "provenance": "repo_fact" | "source_claim" | "assumption", "evidence": ["<the evidence-pack id(s) a repo_fact cites, else empty>"] }], "consensusStatus": "converged" | "diverged", "materialDisagreements": ["<each material disagreement>"] }',
+  "```",
+  "The marker sections above remain required; the JSON payload is additive.",
+].join("\n");
+
+const STRUCTURED_RATIFICATION_INSTRUCTION = [
+  "Additionally, after your marker lines and explanation, repeat your vote as a structured payload in a fenced ```json code block, matching exactly this shape:",
+  "```json",
+  '{ "decision": "accept" | "accept_with_edits" | "block", "blockKind": "<the BLOCK_KIND value, only for block>", "requiredEdits": "<the exact required edits, only for accept_with_edits>" }',
+  "```",
+  "The marker lines above remain required; the JSON payload is additive.",
+].join("\n");
+
 export function buildDeliberationMessages(
   prompt: string,
   responses: ModelCouncilResponse[],
@@ -2497,6 +2576,8 @@ export function buildDeliberationMessages(
         "Name remaining disagreements only if they materially affect the final recommendation.",
         "Your response must contain a CANDIDATE_CONSENSUS: section with the full candidate answer. Keep the candidate unchanged if it is already the maximal solution.",
         "Before the candidate, emit three marker lines: 'CONSENSUS_STATUS: CONVERGED' if the council now agrees and the candidate is ratifiable as-is, otherwise 'CONSENSUS_STATUS: DIVERGED'; 'MATERIAL_DISAGREEMENTS:' followed by a one-line list of the substantive disagreements still blocking consensus, or NONE; and 'PREFERRED_DRAFT:' naming the single strongest candidate draft to carry forward — a peer's anonymized 'Member X' label, or SELF for your own — judged on merit, not identity. Put the CANDIDATE_CONSENSUS: section last so the candidate text is captured cleanly.",
+        // D1: flag-gated (byte-identical legacy prompt when the flag is off).
+        ...(isStructuredCouncilEnabled() ? [STRUCTURED_DELIBERATION_INSTRUCTION] : []),
       ].join(" "),
     },
     {
@@ -2542,6 +2623,8 @@ export function buildRatificationMessages(
         "If you vote ACCEPT_WITH_EDITS, follow the marker with a 'REQUIRED_EDITS:' line (or block) stating the exact edits you require.",
         "If you vote BLOCK, follow the marker with a 'BLOCK_KIND:' line — one of MATERIAL_DISAGREEMENT, INSUFFICIENT_EVIDENCE, SYNTHESIS_ERROR, FACTUAL_ERROR, PROTOCOL — then explain the blocker. Use FACTUAL_ERROR only when the artifact states something contradicted by the evidence.",
         "Check every factual and source-dependent claim in the artifact against the source material quoted in the original request above; if the artifact asserts something the source contradicts, vote BLOCK with BLOCK_KIND: FACTUAL_ERROR and quote the contradicting source. FACTUAL_ERROR and MATERIAL_DISAGREEMENT are absolute vetoes — they end the council at 'blocked' and cannot be cleared by edits, so reserve them for genuine hard stops, not for edits you could request via ACCEPT_WITH_EDITS.",
+        // D1: flag-gated (byte-identical legacy prompt when the flag is off).
+        ...(isStructuredCouncilEnabled() ? [STRUCTURED_RATIFICATION_INSTRUCTION] : []),
       ].join(" "),
     },
     {
@@ -2770,31 +2853,100 @@ export function isStructuredCouncilEnabled(): boolean {
   return process.env.AGENTS_COUNCIL_STRUCTURED === "1" || process.env.AGENTS_COUNCIL_STRUCTURED === "true";
 }
 
-export async function parseRatificationVoteStructured(content: string): Promise<RatificationVote> {
+// D1/D2: extract the candidate structured payload from a member reply. Members are
+// asked to emit the payload in a fenced ```json block ALONGSIDE the legacy markers
+// (D1 — additive, markers stay required), so the reply as a whole is never valid
+// JSON; the LAST fence carries the payload (the instruction puts it after the
+// marker sections, so anything a member quotes comes earlier). A reply that IS a
+// bare JSON object (the pre-D1 structured shape) is accepted as-is. Returns the
+// payload JSON string, or null when the reply carries no structured payload.
+function extractStructuredPayload(content: string): string | null {
+  const fences = [...content.matchAll(/```json\s*([\s\S]*?)```/gi)];
+  const last = fences.at(-1)?.[1]?.trim();
+  if (last) {
+    return last;
+  }
+  const trimmed = content.trim();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    return trimmed;
+  }
+  return null;
+}
+
+// D3: accrue one structured-parse outcome for a member/phase into the run state.
+// Returned as a callback so the exported wrappers stay ignorant of the run state;
+// only the flag-on wrapper paths ever invoke it, so a flag-off run records nothing.
+function recordStructuredParse(
+  state: CouncilRunState,
+  member: ModelCouncilMember,
+  phase: StructuredParseStat["phase"],
+): (outcome: StructuredParseOutcome) => void {
+  return (outcome) => {
+    let stat = state.parseStats.find((entry) => entry.member === member.name && entry.phase === phase);
+    if (!stat) {
+      stat = { member: member.name, phase, ok: 0, fail: 0, absent: 0 };
+      state.parseStats.push(stat);
+    }
+    stat[outcome] += 1;
+  };
+}
+
+// D2: under AGENTS_COUNCIL_STRUCTURED, pre-parse each proposal's convergence
+// signal through the structured wrapper so isConverged reads the payload's
+// consensusStatus / materialDisagreements (falling back to the legacy markers).
+// Flag off this returns undefined and isConverged parses the legacy markers
+// itself, unchanged. No parse-stat is recorded here — the same deliberation
+// reply was already counted once in askDeliberation.
+async function structuredRoundSignals(round: ModelCouncilRound): Promise<ConsensusSignal[] | undefined> {
+  if (!isStructuredCouncilEnabled()) {
+    return undefined;
+  }
+  return Promise.all(round.proposals.map((proposal) => parseConsensusSignalStructured(proposal.content)));
+}
+
+export async function parseRatificationVoteStructured(
+  content: string,
+  onOutcome?: (outcome: StructuredParseOutcome) => void,
+): Promise<RatificationVote> {
   if (!isStructuredCouncilEnabled()) {
     return parseRatificationVote(content);
   }
   const { parseStructuredOrFallback, RatificationVoteSchema } = await import("./council/schemas");
-  const result = parseStructuredOrFallback(content, RatificationVoteSchema, parseRatificationVote);
+  const payload = extractStructuredPayload(content);
+  if (payload === null) {
+    onOutcome?.("absent");
+    return parseRatificationVote(content);
+  }
+  const structured = parseStructuredOrFallback(payload, RatificationVoteSchema, () => null);
+  if (structured === null) {
+    onOutcome?.("fail");
+    return parseRatificationVote(content);
+  }
+  onOutcome?.("ok");
   // The structured schema omits `raw`; rehydrate the legacy shape so downstream
   // consumers (which read `vote.raw`) keep working.
-  if ("raw" in result) {
-    return result;
-  }
-  return { ...result, raw: content };
+  return { ...structured, raw: content };
 }
 
-export async function parseConsensusSignalStructured(content: string): Promise<ConsensusSignal> {
+export async function parseConsensusSignalStructured(
+  content: string,
+  onOutcome?: (outcome: StructuredParseOutcome) => void,
+): Promise<ConsensusSignal> {
   if (!isStructuredCouncilEnabled()) {
     return parseConsensusSignal(content);
   }
   const { parseStructuredOrFallback, DeliberationResponseSchema } = await import("./council/schemas");
-  const fallbackToSignal = (raw: string): ConsensusSignal => parseConsensusSignal(raw);
-  const parsed = parseStructuredOrFallback(content, DeliberationResponseSchema, fallbackToSignal);
-  if ("status" in parsed && "hasMaterialDisagreements" in parsed) {
-    // Legacy fallback already produced a ConsensusSignal.
-    return parsed;
+  const payload = extractStructuredPayload(content);
+  if (payload === null) {
+    onOutcome?.("absent");
+    return parseConsensusSignal(content);
   }
+  const parsed = parseStructuredOrFallback(payload, DeliberationResponseSchema, () => null);
+  if (parsed === null) {
+    onOutcome?.("fail");
+    return parseConsensusSignal(content);
+  }
+  onOutcome?.("ok");
   const disagreements = (parsed.materialDisagreements ?? []).join("; ");
   return {
     status: parsed.consensusStatus ?? "unknown",
@@ -2803,7 +2955,10 @@ export async function parseConsensusSignalStructured(content: string): Promise<C
   };
 }
 
-export async function parseCandidateConsensusStructured(content: string): Promise<string> {
+export async function parseCandidateConsensusStructured(
+  content: string,
+  onOutcome?: (outcome: StructuredParseOutcome) => void,
+): Promise<string> {
   // This exported wrapper keeps its legacy string contract: a markerless reply
   // yields the trimmed content (A4's null is an internal deliberation-loop signal,
   // not this seam's concern), so callers of the structured wrapper are unaffected.
@@ -2812,8 +2967,18 @@ export async function parseCandidateConsensusStructured(content: string): Promis
     return textFallback(content);
   }
   const { parseStructuredOrFallback, DeliberationResponseSchema } = await import("./council/schemas");
-  const parsed = parseStructuredOrFallback(content, DeliberationResponseSchema, textFallback);
-  return typeof parsed === "string" ? parsed : parsed.candidateConsensus;
+  const payload = extractStructuredPayload(content);
+  if (payload === null) {
+    onOutcome?.("absent");
+    return textFallback(content);
+  }
+  const parsed = parseStructuredOrFallback(payload, DeliberationResponseSchema, () => null);
+  if (parsed === null) {
+    onOutcome?.("fail");
+    return textFallback(content);
+  }
+  onOutcome?.("ok");
+  return parsed.candidateConsensus;
 }
 
 // --- Claim-ledger ratification preconditions — WU-B2 -----------------------
@@ -2935,9 +3100,11 @@ export async function evaluateRatificationPreconditions(
   const blocks: ModelCouncilRatification[] = [];
   for (const proposal of proposals) {
     // Extract structured claims if the member emitted a parseable structured
-    // payload; a non-structured (legacy text) payload yields no claims and so
+    // payload (D1: a fenced ```json block alongside the legacy markers, or a bare
+    // JSON reply); a non-structured (legacy text) payload yields no claims and so
     // cannot trip a precondition — the heuristic is best-effort in Wave B.
-    const parsed = parseStructuredOrFallback(proposal.content, DeliberationResponseSchema, () => null);
+    const payload = extractStructuredPayload(proposal.content);
+    const parsed = payload === null ? null : parseStructuredOrFallback(payload, DeliberationResponseSchema, () => null);
     if (parsed === null || typeof parsed === "string" || !("claims" in parsed)) {
       continue;
     }
@@ -3040,7 +3207,7 @@ function normalizeCandidate(candidate: string): string {
 // BLOCK at ratification. NOTE: post-F2 this gate only controls early-stop (whether
 // the loop breaks before maxRounds); it no longer decides whether ratification
 // runs, so loosening or tightening it cannot change a ratified outcome.
-export function isConverged(round: ModelCouncilRound): boolean {
+export function isConverged(round: ModelCouncilRound, structuredSignals?: ConsensusSignal[]): boolean {
   if (!round.changed) {
     return true;
   }
@@ -3048,8 +3215,10 @@ export function isConverged(round: ModelCouncilRound): boolean {
   if (round.similarityToPrevious !== null && round.similarityToPrevious >= simThreshold) {
     return true;
   }
-  // Structured self-reported signal (F3), primary over any lexical proxy.
-  const signals = round.proposals.map((proposal) => parseConsensusSignal(proposal.content));
+  // Structured self-reported signal (F3), primary over any lexical proxy. D2: the
+  // caller may pass pre-parsed signals (the structured-payload path); with none
+  // supplied the legacy markers are parsed here, unchanged.
+  const signals = structuredSignals ?? round.proposals.map((proposal) => parseConsensusSignal(proposal.content));
   if (signals.some((signal) => signal.status === "diverged" || signal.hasMaterialDisagreements)) {
     return false;
   }

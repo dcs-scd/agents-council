@@ -32,6 +32,79 @@
 <p class="sub">A running log of decisions not in the original ask, changes, tradeoffs, and things to know.
 Maintained across the build-out of the multi-model autonomous council. Newest section first.</p>
 
+<h2>Session 2026-07-12 — Lane D: structured subsystem live (stage v2 protocol switch, flag-gated)</h2>
+
+<p class="sub">Council-hardening build, Lane D (D1–D4). Under <code>AGENTS_COUNCIL_STRUCTURED=1</code> the
+deliberation/ratification prompts now request a fenced JSON payload, the live loop parses replies through the
+structured wrappers, per-member/per-phase parse stats accrue into <code>trace-{ts}.json</code>, and the WU-B2
+claim-ledger preconditions are reachable from real replies. Flag off: prompts byte-identical to the merged base
+(pinned by sha256 snapshot test), behavior unchanged (158 pre-existing tests untouched and green).</p>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span> Fenced-payload extraction added — the wrappers' whole-content <code>JSON.parse</code> could never see a D1 reply</h3>
+  <div class="meta">2026-07-12 · <code>extractStructuredPayload</code> in <code>src/core/services/modelCouncil.ts</code></div>
+  <p>The spec said the wrappers "already fall back to legacy internally — verify, don't assume." Verified: they do, but
+  they <code>JSON.parse</code> the <b>whole</b> reply. Since D1 keeps the legacy markers REQUIRED and makes the payload
+  additive, every compliant reply is markers + fence — never valid JSON as a whole — so the structured parse would have
+  failed 100% of the time and the &lt;5% promotion criterion could never be met. Added a single extraction helper: the
+  <b>last</b> <code>```json</code> fence wins; a reply that IS a bare JSON object (the pre-D1 shape used by existing
+  tests and JSON-only members) is accepted as-is; otherwise the payload is "absent". The same extraction now feeds the
+  wrappers, <code>extractStructuredClaims</code> (trace), and <code>evaluateRatificationPreconditions</code> (D4).</p>
+  <p class="why"><b>Why it matters:</b> without this, D2's wiring would be dead code on real traffic and D3's stats
+  would record only failures.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span> Synthesis/fold replies stay on the legacy candidate parser</h3>
+  <div class="meta">2026-07-12 · <code>runModelCouncil</code> repair + fold call sites</div>
+  <p>D2 names three wrappers; each got exactly one live call site: candidate → <code>askDeliberation</code>, vote →
+  <code>ratifyCandidate</code>, signal → <code>isConverged</code> (via a pre-parsed optional argument, keeping
+  <code>isConverged</code> sync and its exported contract intact). The synthesis and fold call sites still use legacy
+  <code>parseCandidateConsensus</code>: D1 does not add the payload instruction to synthesis prompts, so a structured
+  parse there buys nothing — and the wrapper's markerless fallback (<code>raw.trim()</code>) would have silently
+  <em>changed</em> flag-on repair semantics (a markerless synthesis reply currently aborts the repair; the wrapper
+  would have promoted the whole reply to a candidate).</p>
+  <p class="why"><b>Why it matters:</b> narrowest interpretation that satisfies the spec without disturbing Lane A/B
+  repair/fold behavior.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span> D3 stats: <code>ok / fail / absent</code> per member+phase, on the result and in the trace</h3>
+  <div class="meta">2026-07-12 · <code>StructuredParseStat</code>, <code>result.structuredParseStats</code>, trace <code>parseStats[]</code></div>
+  <p>The wrappers take an optional outcome callback (additive — no existing caller breaks); the run state accrues
+  aggregate counts per member+phase (deliberation, ratification). "absent" (member ignored the instruction) is tracked
+  separately from "fail" (payload present but invalid JSON / schema), so the promotion rate is
+  <code>fail / (ok + fail)</code>. The result field appears only when something was recorded — flag-off result JSON is
+  unchanged. Trace keeps <code>schema_version v1</code> (additive field; <code>council_to_brief.py</code> reads only its
+  required top keys); <code>parseStats</code> is sorted member-then-phase since phase completion order is
+  nondeterministic under <code>Promise.allSettled</code>.</p>
+  <p class="why"><b>Why it matters:</b> the operator computes the &lt;5% criterion offline from saved traces alone,
+  which is the whole point of stage v2.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag tradeoff">Tradeoff</span> One deliberation reply is signal-parsed twice under the flag (stats counted once)</h3>
+  <div class="meta">2026-07-12 · <code>askDeliberation</code> vs <code>structuredRoundSignals</code></div>
+  <p>The candidate parse (askDeliberation) and the convergence-signal parse (isConverged input) both validate the same
+  payload against <code>DeliberationResponseSchema</code>. The signal path deliberately does <b>not</b> record stats —
+  recording both would double-count each deliberation turn. Cost is one extra JSON.parse+zod per member per round,
+  flag-on only; threading the parsed object across the two seams would have coupled the exported wrapper contracts.</p>
+  <p class="why"><b>Why it matters:</b> keeps the seams independent and the accrual honest at trivial runtime cost.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span> Flag-on candidate precedence changed: a schema-valid payload now beats the legacy marker</h3>
+  <div class="meta">2026-07-12 · <code>askDeliberation</code> under <code>AGENTS_COUNCIL_STRUCTURED=1</code></div>
+  <p>Pre-D2 flag-on behavior parsed the marker first and only used the raw reply when markerless. Now the payload's
+  <code>candidateConsensus</code> wins when it validates, falling back to marker, then raw reply. If a member emits a
+  marker and payload that disagree, the payload is authoritative. Also: the global <code>getParseFailStats()</code>
+  counter in <code>schemas.ts</code> still ticks (read only by its own unit tests); the docs' pre-existing "JSON mode is
+  requested where the provider supports it" line is aspirational — stage v2 requests the payload via prompt, not
+  provider JSON mode. Left as-is (pre-existing text, outside D3's named doc edits).</p>
+  <p class="why"><b>Why it matters:</b> reviewers diffing flag-on transcripts pre/post Lane D should expect candidate
+  text to come from the payload, not the marker tail.</p>
+</div>
+
 <h2>Session 2026-07-12 — Lane C: <code>council solve</code> CLI surface + staged skill-wrapper rewrites</h2>
 
 <p class="sub">Council-hardening build, Lane C (drift-class elimination). Added file/roster/banner to the

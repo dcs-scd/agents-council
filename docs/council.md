@@ -425,6 +425,30 @@ the flag off the council behaves exactly as it did before.
 - **Set the flag to enable** the typed schemas, the provenance/source-ID preconditions, the
   trace file, and the issue-map file.
 
+### Rollout stage: v2 — protocol switch (flag-gated)
+
+The structured subsystem is currently at **stage v2**: with the flag on, the protocol itself
+requests structured payloads and the live loop consumes them.
+
+- **Prompts.** Deliberation and ratification prompts additionally ask each member to append a
+  fenced ` ```json ` payload (matching the Zod schemas below) after the legacy marker sections.
+  The legacy markers remain **required** — the payload is additive, so a member that ignores it
+  degrades gracefully to the legacy text path.
+- **Parsing.** The live loop reads replies through `parseRatificationVoteStructured` /
+  `parseConsensusSignalStructured` / `parseCandidateConsensusStructured`: a schema-valid fenced
+  payload wins; anything else (absent fence, invalid JSON, schema mismatch) falls back to the
+  legacy text parse of the full reply.
+- **Parse-stats accrual.** Every structured parse attempt is recorded per member/phase as
+  `ok` / `fail` / `absent` on `result.structuredParseStats` and persisted into `trace-{ts}.json`
+  (`parseStats[]`), so the parse-fail promotion criterion is computable **offline from saved
+  traces alone**: `fail / (ok + fail)` per member/phase, aggregated across runs. `absent` (the
+  member ignored the payload instruction) is tracked separately — it is protocol noncompliance,
+  not a parse failure.
+- **Flag off**, prompts and behavior are byte-for-byte legacy (pinned by test).
+
+The promotion criteria (Graduation gate below) are **unchanged** — stage v2 only makes their
+evidence accrue.
+
 ### Typed claim schema and text fallback
 
 Under the flag, member proposals and ratifications are validated against Zod schemas defined
@@ -516,8 +540,10 @@ Under the flag, `saveModelCouncilRun` writes a `trace-{ts}.json` file
 top-level shape mirrors the external consumer contract in
 `~/.claude/halo_x_tools/council_to_brief.py` (`prompt`, `members{id,name,provider,model}`,
 `consensus{reached,ratifiedBy,blockedBy}`, `converged`, `rounds{index,changed,memberAgreement}`,
-`candidateConsensus`), plus an additive per-claim / per-member / per-round `claims[]`. **Member
-weights are equal** — every member carries `weight === 1`; the trace never weights by prestige.
+`candidateConsensus`), plus an additive per-claim / per-member / per-round `claims[]` and — at
+stage v2 — an additive per-member/per-phase `parseStats[]` (`{ member, phase, ok, fail, absent }`,
+sorted by member then phase for a deterministic artifact). **Member weights are equal** — every
+member carries `weight === 1`; the trace never weights by prestige.
 A real generated trace parses cleanly through `council_to_brief.py` in both `--format json` and
 `--format brief`.
 
@@ -614,6 +640,10 @@ gate, which requires **both**:
 
 1. a structured-output **parse-fail rate < 5% over ≥ 50 sample runs**, and
 2. the structured council **beats self-consistency** on the benchmark distribution.
+
+At stage v2 the evidence for criterion 1 accrues automatically: each flag-on run persists its
+per-member/per-phase `ok`/`fail`/`absent` counts in `trace-{ts}.json` (`parseStats[]`), so the
+rate is computed from saved traces without re-running anything.
 
 On failure, the issue map is downgraded to audit-only, the F3 self-report and the provenance
 label gate are kept, and graduation stops. Wave C is recorded as deferred work in
