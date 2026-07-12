@@ -32,6 +32,35 @@
 <p class="sub">A running log of decisions not in the original ask, changes, tradeoffs, and things to know.
 Maintained across the build-out of the multi-model autonomous council. Newest section first.</p>
 
+<h2>Session 2026-07-12 — Landing: skills into ~/.claude + live acceptance</h2>
+
+<p class="sub">Final phase of the council-hardening build. Primary checkout fast-forwarded to the
+integration merge (all four lanes), <code>dist/council</code> rebuilt, skills landed, live smoke passed.</p>
+
+<div class="entry">
+  <span class="ts">2026-07-12 23:40</span> <span class="tag FYI">FYI</span>
+  <p>Acceptance (T0, live): <code>run-council2 two "Reply with the single word OK and ratify it."</code>
+  through the landed wrapper + rebuilt binary → outcome <code>ratified</code> by both members, exit 0,
+  peerLabels (Member A/B) recorded, nominationMethod <code>unanimous</code>, ledgerTotals {6 calls,
+  43.7 s, 72,003 tokens}, no drops, transcript in the env-pinned deliberations dir, both stderr banners
+  present. Full gates at landing: typecheck clean, <b>169 pass / 0 fail</b> (baseline was 121).</p>
+  <p class="why">Why: the one end-to-end path no unit test covers is wrapper → CLI → engine → transcript.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-07-12 23:40</span> <span class="tag DECISION">DECISION</span>
+  <p>Landed per <code>skill_staging/LANDING.md</code>: shared <code>run-council-common.sh</code> +
+  both wrappers + both SKILL.md files into <code>~/.claude/skills/</code> (timestamped .bak copies of all
+  5 prior files taken first); <code>run_council4_driver.ts</code> deleted (superseded by
+  <code>council solve --file</code>). Beyond the staged files: <code>council-to-halo/SKILL.md</code> Step-3
+  prose rewritten for native <code>ratified_with_edits</code> (with a legacy-transcript caveat for
+  pre-2026-07-12 runs), and run-council4's stale timeout note updated to name
+  <code>AGENTS_COUNCIL_MEMBER_TIMEOUT_MS</code> as primary. <code>council_to_brief.py</code> needed no
+  change (outcome is free-form pass-through — verified).</p>
+  <p class="why">Why: LANDING.md §3/§4 flagged both follow-ups; leaving stale operator docs was the
+  drift-class defect this build exists to kill.</p>
+</div>
+
 <h2>Session 2026-07-12 — Lane D: structured subsystem live (stage v2 protocol switch, flag-gated)</h2>
 
 <p class="sub">Council-hardening build, Lane D (D1–D4). Under <code>AGENTS_COUNCIL_STRUCTURED=1</code> the
