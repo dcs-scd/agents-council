@@ -3,12 +3,15 @@ import path from "node:path";
 import { Command } from "commander";
 
 import {
+  buildDefaultMembers,
   councilOutcomeExitCode,
   formatModelCouncilMarkdown,
+  resolveMaxRounds,
   runModelCouncil,
   saveModelCouncilFailure,
   saveModelCouncilRun,
 } from "../core/services/modelCouncil";
+import { resolveDeliberationsDir } from "../core/state/path";
 import { startMcpServer } from "../interfaces/mcp/server";
 import { launchDesktopApp } from "./desktopLauncher";
 
@@ -56,11 +59,28 @@ const main = async (): Promise<void> => {
   program
     .command("solve")
     .description("Run the configured multi-agent model council and print the peer-ratified consensus result.")
-    .argument("<prompt...>", "Problem or question for the council")
+    .argument("[prompt...]", "Problem or question for the council (omit when using --file).")
+    .option("--file <path>", "Read the prompt from a file instead of the argv prompt (mutually exclusive).")
+    .option("--members <a,b,c>", "Comma-separated council roster for this run; overrides AGENTS_COUNCIL_MEMBERS.")
     .option("--json", "Print the full structured council result as JSON.")
-    .action(async (promptParts: string[], options: { json?: boolean }) => {
+    .action(async (promptParts: string[], options: { file?: string; members?: string; json?: boolean }) => {
+      let prompt: string;
       try {
-        const result = await runModelCouncil({ prompt: promptParts.join(" ") });
+        prompt = await resolveSolvePrompt(promptParts, options.file);
+      } catch (error) {
+        reportAndExit("Failed to run model council", error);
+      }
+
+      // An explicit --members roster wins over the ambient AGENTS_COUNCIL_MEMBERS
+      // by overwriting it, so the run and the engine's own roster validation see a
+      // single source of truth (an unmatched roster throws exactly as the env path).
+      if (typeof options.members === "string" && options.members.trim().length > 0) {
+        process.env.AGENTS_COUNCIL_MEMBERS = options.members;
+      }
+
+      try {
+        printSolveBanner(version);
+        const result = await runModelCouncil({ prompt });
         try {
           const saved = await saveModelCouncilRun(result);
           console.error(`Saved deliberation record to ${saved.jsonPath}`);
@@ -82,7 +102,7 @@ const main = async (): Promise<void> => {
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         try {
-          const saved = await saveModelCouncilFailure({ prompt: promptParts.join(" "), error: detail });
+          const saved = await saveModelCouncilFailure({ prompt, error: detail });
           console.error(`Saved failure transcript to ${saved.jsonPath}`);
         } catch (saveError) {
           const saveDetail = saveError instanceof Error ? saveError.message : String(saveError);
@@ -129,6 +149,46 @@ const main = async (): Promise<void> => {
 main().catch((error) => {
   reportAndExit("Failed to start council", error);
 });
+
+// Resolve the council prompt from either the argv prompt or --file, enforcing
+// that exactly one source is given. Reading from a file kills the ~128KB argv
+// limit that forced run-council4's deep-import driver.
+async function resolveSolvePrompt(promptParts: string[], file: string | undefined): Promise<string> {
+  const argvPrompt = promptParts.join(" ").trim();
+  const hasArgv = argvPrompt.length > 0;
+  const filePath = typeof file === "string" ? file.trim() : "";
+  const hasFile = filePath.length > 0;
+
+  if (hasArgv && hasFile) {
+    throw new Error("Provide either a prompt argument or --file, not both.");
+  }
+  if (!hasArgv && !hasFile) {
+    throw new Error("Provide a prompt: pass it as an argument or with --file <path>.");
+  }
+
+  if (hasFile) {
+    try {
+      return await Bun.file(filePath).text();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`--file could not be read (${filePath}): ${detail}`);
+    }
+  }
+
+  return argvPrompt;
+}
+
+// One stderr line on start: the resolved roster, engine version, max rounds, and
+// the deliberations dir actually resolved (env-pinned or project-local default),
+// so backgrounded runs record where their transcripts will land.
+function printSolveBanner(version: string): void {
+  const roster = buildDefaultMembers()
+    .map((member) => member.id)
+    .join(",");
+  console.error(
+    `council solve: roster=${roster} version=${version} maxRounds=${resolveMaxRounds()} deliberations=${resolveDeliberationsDir()}`,
+  );
+}
 
 function parseFormat(value: string): ResponseFormat {
   if (value !== "markdown" && value !== "json") {

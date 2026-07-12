@@ -92,6 +92,35 @@ Help and version flags are also supported without starting the server:
 ./dist/council --version
 ```
 
+### One-shot model council (`council solve`)
+
+`council solve` runs the multi-agent model council once and prints the peer-ratified
+consensus. The prompt comes from **either** the argv prompt **or** `--file` (exactly
+one — supplying both, or neither, is an error):
+
+```bash
+./dist/council solve "Decide the best architecture for ..."   # inline prompt
+./dist/council solve --file /path/to/brief.md                 # prompt from a file
+```
+
+- `--file <path>` reads the prompt from a file, bypassing the ~128 KB argv limit
+  (so large briefs run without a separate driver).
+- `--members <a,b,c>` sets the roster for this run and **overrides**
+  `AGENTS_COUNCIL_MEMBERS`; it uses the same validation as the env path.
+- `--json` prints the full structured result instead of the markdown answer.
+
+On start, `solve` prints one banner line to **stderr** — the resolved roster, the
+engine version, the max deliberation rounds, and the deliberations directory actually
+resolved — before the run begins:
+
+```
+council solve: roster=claude,chatgpt,gemini version=0.4.0 maxRounds=6 deliberations=/…/deliberations
+```
+
+Exit code: a `blocked` outcome exits non-zero; `ratified` / `not_attempted` exit 0.
+Deliberation transcripts are written to the resolved deliberations dir (see
+`AGENTS_COUNCIL_DELIBERATIONS_DIR` below).
+
 ### Desktop UI
 
 The MCP tools are meant for AI agent clients (Claude/Codex/Gemini/etc). The desktop UI is the human-facing
@@ -349,6 +378,17 @@ AGENTS_COUNCIL_STATE_PATH=/path/to/state.json
 ```
 
 The config path uses the same directory as the resolved state path.
+
+Council deliberation transcripts (`council solve`) default to the project-local
+`deliberations/` folder. Override the location with:
+
+```
+AGENTS_COUNCIL_DELIBERATIONS_DIR=/path/to/deliberations
+```
+
+Pinning this to an absolute path makes the transcript land there regardless of the
+process cwd — the recommended setting for backgrounded runs (a detached run whose cwd
+differs would otherwise fail to write the cwd-relative default).
 
 Summon prerequisites:
 

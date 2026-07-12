@@ -32,6 +32,73 @@
 <p class="sub">A running log of decisions not in the original ask, changes, tradeoffs, and things to know.
 Maintained across the build-out of the multi-model autonomous council. Newest section first.</p>
 
+<h2>Session 2026-07-12 — Lane C: <code>council solve</code> CLI surface + staged skill-wrapper rewrites</h2>
+
+<p class="sub">Council-hardening build, Lane C (drift-class elimination). Added file/roster/banner to the
+<code>solve</code> CLI, and staged rewrites of the two skill wrappers (<code>run-council2</code>, <code>run-council4</code>)
+under <code>skill_staging/</code> for the operator to land into <code>~/.claude</code>.</p>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span> <code>council solve</code> gains <code>--file</code>, <code>--members</code>, and a stderr start banner</h3>
+  <div class="meta">2026-07-12 · <code>src/cli/index.ts</code> + <code>src/cli/index.test.ts</code></div>
+  <p>The <code>solve</code> prompt argument is now optional (<code>[prompt...]</code>) and mutually exclusive with
+  <code>--file &lt;path&gt;</code> (both/neither error clearly). <code>--file</code> reads the prompt via <code>Bun.file().text()</code>,
+  killing the ~128&nbsp;KB argv limit. <code>--members &lt;a,b,c&gt;</code> overwrites <code>AGENTS_COUNCIL_MEMBERS</code> so the
+  engine's existing roster validation is the single source of truth (explicit flag wins). On start it prints one stderr line:
+  resolved roster, engine version, max rounds, and the resolved deliberations dir.</p>
+  <p class="why"><b>Why it matters:</b> the file input makes run-council4's deep-import bun driver unnecessary; the banner makes a
+  backgrounded run self-documenting about where its transcript lands.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag decision">Decision</span> Roster override via <code>process.env</code> overwrite, not a new <code>runModelCouncil</code> parameter</h3>
+  <div class="meta">2026-07-12 · reuses <code>buildDefaultMembers()</code> / <code>selectConfiguredMembers()</code></div>
+  <p><code>runModelCouncil</code> takes no members argument; the roster is resolved internally from <code>AGENTS_COUNCIL_MEMBERS</code>.
+  Rather than thread a new parameter through the engine (a new layer, and a second validation path), the CLI sets
+  <code>process.env.AGENTS_COUNCIL_MEMBERS</code> from <code>--members</code> before the run. Same validation, flag wins, zero engine
+  surface added. Exported <code>resolveMaxRounds</code> (one keyword) so the banner shares the engine's single source for the round cap.</p>
+  <p class="why"><b>Why it matters:</b> honors SHARED simplicity-first (no new services/normalizers) and keeps the flag semantics
+  byte-identical to the env path.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag change">Change</span> Both skill wrappers rewritten onto one shared <code>run-council-common.sh</code></h3>
+  <div class="meta">2026-07-12 · staged under <code>skill_staging/</code> (operator lands into <code>~/.claude</code>; see <code>skill_staging/LANDING.md</code>)</div>
+  <p>Factored the shared run discipline into <code>run-council-common.sh</code> (sourced by both): absolute-pinned
+  <code>AGENTS_COUNCIL_DELIBERATIONS_DIR</code> (kills EACCES-on-detach; backgrounding is now safe), a <b>stale-dist guard</b>
+  (rejects <code>dist/council</code> older than the newest <code>src/</code> file, warning + falling back to bun-from-source), and a
+  <b>per-seat roster preflight</b> (claude/codex/gemini CLIs + gemini auth + OpenRouter/Moonshot/DeepSeek keys as the direct-vendor
+  mode dictates). <code>run-council2</code> <code>two</code> now <b>pins</b> <code>claude,chatgpt</code> instead of unsetting the env
+  (the engine default silently became 3-member incl. gemini on 2026-06-09). <code>run-council4</code> drops its deep-import driver for
+  <code>council solve --file</code> (driver marked for deletion in LANDING.md).</p>
+  <p class="why"><b>Why it matters:</b> these were the confirmed drift/defects — a stale dist ran 5-week-old code silently, a rebuild
+  re-armed the 3-member trap, and detached runs lost transcripts.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span> SKILL.md docs describe the post-merge end state (Lane A / Lane B)</h3>
+  <div class="meta">2026-07-12 · re-check after merge — captured in <code>skill_staging/LANDING.md §4</code></div>
+  <p>Per the Lane C spec, the rewritten SKILL.md files already document Lane A's native <code>ratified_with_edits</code> outcome
+  (exit&nbsp;0; edits folded by the engine, no manual fold) and the corrected exit-code contract (<code>blocked → 1</code>, else
+  <code>0</code>). Lane A must map <code>ratified_with_edits → 0</code> in <code>councilOutcomeExitCode</code> for the docs to hold.
+  <code>council-to-halo</code> was checked read-only: <code>council_to_brief.py</code> does <b>not</b> hard-pin the outcome enum
+  (<code>_opt(consensus.get("outcome"))</code>), so the new outcome flows through with no code change; only its SKILL.md manual-fold
+  note is superseded (flagged in LANDING.md, not edited — out of lane scope).</p>
+  <p class="why"><b>Why it matters:</b> these are the cross-lane seams the operator must re-verify once A/B land alongside C.</p>
+</div>
+
+<div class="entry">
+  <h3><span class="tag heads-up">Heads-up</span> Pre-existing baseline is not clean: 1 flaky test + <code>format:check</code> failures in untouched files</h3>
+  <div class="meta">2026-07-12 · out of Lane C scope — left untouched per the surgical rule</div>
+  <p><code>bun run format:check</code> already fails at HEAD (before my edits) on <code>council_runs/tier11_council_run.ts</code>,
+  <code>harness/run_tier5_scheduling_council.ts</code>, and two oversized JSON files — none of which Lane C touches; my changed files
+  are format-clean. The <code>chat bridge actions</code> watcher test is flaky (fails ~1/suite-run, passes 3/3 in isolation), a
+  timing race unrelated to this lane. Neither was "fixed" — reformatting out-of-scope files or touching the watcher would violate the
+  touch-only-what-your-spec-names constraint.</p>
+  <p class="why"><b>Why it matters:</b> the SHARED "format:check must be clean" gate can't be met globally without editing files
+  outside the lane; my deliverable files pass it.</p>
+</div>
+
 <h2>Session 2026-06-23 — Borrow bb's anti-polling primitive: <code>wait_for_session_data</code> MCP tool</h2>
 
 <p class="sub">After evaluating <code>ymichael/bb</code> (a competing agent-IDE) the user asked to apply its patterns here.

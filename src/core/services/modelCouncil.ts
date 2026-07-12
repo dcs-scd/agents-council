@@ -1944,7 +1944,7 @@ export function isConverged(round: ModelCouncilRound): boolean {
   return Number.isFinite(draftOverlap) && draftOverlap >= agreementThreshold;
 }
 
-function resolveMaxRounds(): number {
+export function resolveMaxRounds(): number {
   const raw = readEnv("AGENTS_COUNCIL_MAX_ROUNDS");
   if (raw) {
     const parsed = Number.parseInt(raw, 10);
