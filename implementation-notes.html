@@ -348,6 +348,59 @@ A4 markerless-exclusion + PREFERRED_DRAFT nomination, A5 evidence pack in ratifi
   </ul>
 </div>
 
+<h2>Session 2026-07-12 — Council hardening: fix everything from the D1–D10 evaluation by deadline</h2>
+
+<p class="sub">A full evaluation of run-council2 / run-council4 / the engine produced ten confirmed defects
+(headline: 77% of "blocked" outcomes are an ACCEPT_WITH_EDITS labeling artifact; 11% of runs die with total
+work loss; the two skills execute different engine versions). Operator directive: "everything fixed by 9pm,
+work in parallel at maximal level." Four parallel lanes in isolated worktrees off <code>b974c1e</code>.</p>
+
+<div class="entry">
+  <span class="ts">2026-07-12 22:10</span> <span class="tag OFF-SPEC">OFF-SPEC</span>
+  <p>Bypassed HALO-X (o4 Hard Rule 8) and the S7 fleet-execute lane; ran the build as in-session
+  parallel Opus agents in per-lane git worktrees (lane/council-a/b/c + wave-2 d), with the written
+  evaluation (P1–P10) as the plan of record and T0 acceptance by the main session.</p>
+  <p class="why">Why: hard 9pm deadline + explicit "work in parallel at maximal level" directive; plan+decompose
+  overhead historically eats hours; skill edits (~/.claude/**) are in-session-exception territory anyway.
+  Deviation announced to the operator before dispatch.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-07-12 22:10</span> <span class="tag DECISION">DECISION</span>
+  <p>Outcome enum grows: new <code>ratified_with_edits</code> (AWE-only, no absolute veto → one engine-native
+  fold synthesis by the chair, exit code 0, no re-ratification of the folded text). This deliberately amends the
+  previously frozen outcome contract (INV-6); docs, exit-code seam, skills, and council-to-halo notes updated together.</p>
+  <p class="why">Why: 10 of 13 historical "blocked" runs were AWE-only — the manual SKILL.md fold rule was engine
+  semantics living in documentation.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-07-12 22:10</span> <span class="tag DECISION">DECISION</span>
+  <p>Kept run-council2 and run-council4 as separate skills (P3 originally proposed consolidation); instead both
+  wrappers source one shared run-discipline script, pin rosters explicitly, guard against stale <code>dist/council</code>,
+  preflight every seat, and export <code>AGENTS_COUNCIL_DELIBERATIONS_DIR</code>. New skill files staged in-repo
+  under <code>skill_staging/</code>; landing into ~/.claude is an operator-session step.</p>
+  <p class="why">Why: renaming user-typed skills breaks muscle memory; shared-script factoring kills the drift
+  class the consolidation was for.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-07-12 22:10</span> <span class="tag TRADEOFF">TRADEOFF</span>
+  <p>Lanes A and B both rewrite regions of the 2,138-line <code>modelCouncil.ts</code> in parallel; merge order
+  C → A → B (B rebased with conflict resolution) → D accepts merge cost to buy wall-clock. Structured-v2 wiring
+  (Lane D) is deliberately second-wave because it collides with A at the ratification parse sites.</p>
+  <p class="why">Why: deadline; the alternative (serializing A→B→D) forfeits ~an hour with three idle lanes.</p>
+</div>
+
+<div class="entry">
+  <span class="ts">2026-07-12 22:10</span> <span class="tag FYI">FYI</span>
+  <p>Project CLAUDE.md mandates the Backlog.md MCP workflow, but no backlog MCP server is connected in this
+  session (ToolSearch: no match) — proceeded without it. Baseline at <code>b974c1e</code>: 121 tests pass / 0 fail.
+  B5's per-member context budgets are deliberately conservative built-ins, env-overridable — advisory warnings by
+  default, seat-drop only under <code>AGENTS_COUNCIL_DROP_OVERSIZED=1</code>, to avoid hard-failing on wrong constants.</p>
+  <p class="why">Why: recorded so the missing-backlog gap and the guessed context constants are visible for later correction.</p>
+</div>
+
 <h2>Session 2026-06-23 — Borrow bb's anti-polling primitive: <code>wait_for_session_data</code> MCP tool</h2>
 
 <p class="sub">After evaluating <code>ymichael/bb</code> (a competing agent-IDE) the user asked to apply its patterns here.
