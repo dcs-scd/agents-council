@@ -408,6 +408,11 @@ AGENTS_COUNCIL_SUMMON_DEBUG=1
 
 ## Structured deliberation subsystem (Claim-Ledger Delphi)
 
+> **Deep dive:** [`structured-mode-and-model-usage.md`](./structured-mode-and-model-usage.md) —
+> what the 2026-07-13 fix rounds changed, how it affects which models you seat and how their
+> replies are read, worked examples of every fusion path, and the offline replay loop that
+> replaces live re-convening as the evaluation method.
+
 The model council ships an optional **structured deliberation path** layered onto the
 existing text-based council in `src/core/services/modelCouncil.ts`. It adds typed claims,
 provenance checks, dissent and trace artifacts, and an observational issue map — without

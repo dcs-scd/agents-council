@@ -32,6 +32,41 @@
 <p class="sub">A running log of decisions not in the original ask, changes, tradeoffs, and things to know.
 Maintained across the build-out of the multi-model autonomous council. Newest section first.</p>
 
+<h2>Session 2026-07-13 (latest) — Writing it up falsified one of my own claims</h2>
+
+<div class="entry">
+  <h3>CORRECTION: the parse rate is not a per-model trait. My prompt edit caused the collapse.</h3>
+  <div class="meta">2026-07-13 17:30 <span class="tag heads-up">FYI</span></div>
+  <p>I reported earlier that "Opus omits <code>evidence</code> on assumptions; ChatGPT emits <code>[]</code>"
+  — i.e. that the parse rate was a stable function of <em>which model you seated</em>. Writing the usage doc
+  forced me to diff the two live transcripts, and that is <strong>wrong</strong>:</p>
+  <table>
+    <tr><th>Run</th><th>Prompt</th><th>Opus deliberation payloads</th><th>Overall</th></tr>
+    <tr><td>12:59</td><td><em>without</em> <code>cheapestVerification</code></td><td><b>3 ok / 0 fail</b></td><td>0% fail</td></tr>
+    <tr><td>13:43</td><td><em>with</em> <code>cheapestVerification</code></td><td><b>0 ok / 3 fail</b></td><td>37.5% fail</td></tr>
+  </table>
+  <p>Same model, same brief, same roster — opposite results. In the second run Opus omitted
+  <code>evidence</code> on <strong>exactly the <code>assumption</code> claims and nothing else</strong>, in all
+  three rounds (7/7, 8/8, 12/12). The only prompt delta is the key I added to fix the unwinnable
+  precondition: <code>"cheapestVerification": "&lt;REQUIRED for an assumption: …; <b>omit for other
+  provenance</b>&gt;"</code>. The word "omit" entered the schema description for the first time, and the model
+  generalized the omission to a <em>different</em> field on the <em>same</em> claim type.</p>
+  <p class="why">Why it matters: a one-line prompt edit intended to fix an unrelated defect moved the
+  parse-fail rate from 0% to 37.5% for one seat. Confidence in the causal mechanism is <b>moderate</b> (one
+  run per condition; sampling variance not excluded) — but confidence in the consequence is <b>high</b>: a
+  number that behaves like that cannot be a promotion criterion. A prompt edit is a protocol change.</p>
+</div>
+
+<div class="entry">
+  <h3>Stored the model-usage document</h3>
+  <div class="meta">2026-07-13 17:40 <span class="tag change">CHANGE</span></div>
+  <p><code>docs/structured-mode-and-model-usage.md</code> — the five defects with live-transcript evidence,
+  what fusion changes about which models you can safely seat, worked examples of every parse path (prose ×
+  fence truth tables), the transcript-reading recipes, the env reference, and the offline replay loop that
+  replaces live re-convening (~1.27M tokens / 22.7 min per 2-member run — the <code>&ge; 50 run</code>
+  criterion would cost ~64M tokens). Linked from <code>docs/council.md</code>.</p>
+</div>
+
 <h2>Session 2026-07-13 (later) — The authority fix: the payload can no longer overrule the prose</h2>
 
 <p class="sub">Acting on the recommendation after the gate-3 report. The council's objection to the
