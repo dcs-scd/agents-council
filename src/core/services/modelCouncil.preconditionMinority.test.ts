@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
 import {
+  councilOutcomeExitCode,
   evaluateRatificationPreconditions,
   runModelCouncil,
   shouldAttemptRepair,
@@ -9,21 +10,28 @@ import {
   type ModelCouncilRatification,
 } from "./modelCouncil";
 
-// M1 (post-hydra hardening) — a WU-B2 claim-ledger precondition block must reach
-// `consensus.minorityReport` AND survive the WU-B4 repair cycle.
+// M1 (revised 2026-07-13) — a WU-B2 claim-ledger precondition is a FINDING, not a vote.
 //
-// The pre-existing modelCouncil.minorityReport.test.ts proves a *hand-built*
-// FACTUAL_ERROR veto reaches the report, but it never routes through the real
-// evaluateRatificationPreconditions path and never touches shouldAttemptRepair.
-// This file closes both gaps:
-//   (1) end-to-end: a structured proposal citing an unverifiable repo_fact, run
-//       through the REAL runModelCouncil under the flag (mock OpenRouter transport),
-//       lands a SOURCE_ID_MISMATCH FACTUAL_ERROR dissent in consensus.minorityReport
-//       and records NO repair — the absolute veto gated the repair cycle off, so the
-//       block cannot be re-ratified away (a re-ratify replaces ratifications wholesale).
-//   (2) the gate itself: shouldAttemptRepair is false for a REAL precondition block,
-//       and — contrast — true for a non-absolute block of the same slate shape, so
-//       (1)'s no-repair result is provably the veto's doing, not the slate shape.
+// This file previously pinned the opposite contract: a fired precondition synthesized an
+// absolute FACTUAL_ERROR ratification attributed to the member, which blocked the run and
+// gated the repair cycle off. The first substantive live run under the flag showed why that
+// is wrong — both members voted ACCEPT_WITH_EDITS, and the council still came back `blocked`
+// with each member listed in BOTH `acceptedWithEditsBy` and `blockedBy`, no edit-fold, exit 1.
+// The engine was forging votes nobody cast, and an evidence-hygiene lapse was being treated as
+// an absolute veto (the kind reserved for a member asserting a factual error).
+//
+// The contract these tests now pin:
+//   (1) end-to-end: a structured proposal citing an unverifiable repo_fact records a
+//       SOURCE_ID_MISMATCH *finding*, and the members' own votes decide the outcome — an
+//       ACCEPT slate ratifies, exit 0. The finding is reported, never tallied.
+//   (2) the live regression: an ACCEPT_WITH_EDITS slate WITH a fired precondition reaches
+//       `ratified_with_edits` with the edits folded, and the member never appears in
+//       `blockedBy`. This is the exact case that failed in production.
+//   (3) the gate: preconditions never reach shouldAttemptRepair, and a real non-absolute
+//       member block of the same slate shape is still repairable — proving (1)/(2) come from
+//       the findings being out of the tally, not from repair being broken.
+// A member's OWN absolute veto is untouched (INV-4): modelCouncil.minorityReport.test.ts still
+// pins a hand-cast FACTUAL_ERROR block -> blocked + minorityReport.
 
 const FLAG = "AGENTS_COUNCIL_STRUCTURED";
 
@@ -32,7 +40,7 @@ const FLAG = "AGENTS_COUNCIL_STRUCTURED";
 const TOUCHED_ENV = [
   FLAG,
   "AGENTS_COUNCIL_MEMBERS",
-  // A2: the end-to-end case uses a single-member roster, so it opts into the solo quorum.
+  // A2: the end-to-end cases use a single-member roster, so they opt into the solo quorum.
   "AGENTS_COUNCIL_ALLOW_SOLO",
   "OPENROUTER_API_KEY",
   "AGENTS_COUNCIL_OPENROUTER_URL",
@@ -58,7 +66,7 @@ function proposal(content: unknown): ModelCouncilCandidateProposal {
 }
 
 // A lone repo_fact citing a pack id that does not exist → the Level-1 source-ID
-// check fires SOURCE_ID_MISMATCH → an absolute FACTUAL_ERROR precondition block.
+// check fires SOURCE_ID_MISMATCH → a claim-ledger finding (no vote).
 const PLANTED = {
   candidateConsensus: "use Bun",
   claims: [{ id: "c1", text: "the build script is `bun run x`", provenance: "repo_fact", evidence: ["EV-404"] }],
@@ -90,52 +98,89 @@ function mockOpenRouter(canned: string[]): { url: string; stop: () => void } {
   return { url: server.url.toString(), stop: () => server.stop(true) };
 }
 
-describe("M1 claim-ledger precondition reaches minorityReport + survives repair", () => {
-  test("(end-to-end) a structured unverifiable repo_fact blocks the run; its dissent reaches minorityReport, with no repair", async () => {
+function structuredSoloEnv(serverUrl: string): void {
+  process.env[FLAG] = "1";
+  process.env.AGENTS_COUNCIL_MEMBERS = "kimi";
+  process.env.AGENTS_COUNCIL_ALLOW_SOLO = "1";
+  process.env.OPENROUTER_API_KEY = "test-key";
+  process.env.AGENTS_COUNCIL_OPENROUTER_URL = serverUrl;
+  process.env.AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS = "5000";
+  process.env.AGENTS_COUNCIL_MAX_ROUNDS = "1";
+}
+
+describe("M1 claim-ledger precondition is a finding, not a vote", () => {
+  test("(end-to-end) an unverifiable repo_fact is reported as a finding; the member's ACCEPT still ratifies", async () => {
     const server = mockOpenRouter([
       "Initial independent answer.",
       // deliberation (round 1): structured payload whose repo_fact cites EV-404,
       // absent from the (empty) evidence pack -> SOURCE_ID_MISMATCH precondition.
       JSON.stringify(PLANTED),
-      // ratification: the member accepts; the prepended precondition veto still blocks.
+      // ratification: the member accepts. Under the old contract the synthesized veto
+      // overrode this and blocked the run; now the member's own vote decides.
       "CONSENSUS: ACCEPT\nMatches the source.",
     ]);
-    process.env[FLAG] = "1";
-    process.env.AGENTS_COUNCIL_MEMBERS = "kimi";
-    process.env.AGENTS_COUNCIL_ALLOW_SOLO = "1";
-    process.env.OPENROUTER_API_KEY = "test-key";
-    process.env.AGENTS_COUNCIL_OPENROUTER_URL = server.url;
-    process.env.AGENTS_COUNCIL_OPENROUTER_TIMEOUT_MS = "5000";
-    process.env.AGENTS_COUNCIL_MAX_ROUNDS = "1";
+    structuredSoloEnv(server.url);
     try {
       const result = await runModelCouncil({ prompt: "What is the build script?" });
 
-      expect(result.consensus.outcome).toBe("blocked");
-      expect(result.consensus.minorityReport).toBeDefined();
-      const ledgerDissent = result.consensus.minorityReport!.find((entry) =>
-        entry.dissent.includes("SOURCE_ID_MISMATCH"),
-      );
-      expect(ledgerDissent).toBeDefined();
-      expect(ledgerDissent!.blockKind).toBe("FACTUAL_ERROR");
-      expect(ledgerDissent!.absolute).toBe(true);
-      // The precondition block is still in the decisive ratifications (not re-ratified
-      // away) BECAUSE the absolute veto gated the repair cycle off entirely.
-      expect(result.ratifications.some((ratification) => ratification.content.includes("SOURCE_ID_MISMATCH"))).toBe(
-        true,
-      );
-      expect(result.repair).toBeUndefined();
+      // The member accepted, so the council ratifies — the hygiene finding does not vote.
+      expect(result.consensus.outcome).toBe("ratified");
+      expect(councilOutcomeExitCode(result.consensus.outcome)).toBe(0);
+      expect(result.consensus.blockedBy).toEqual([]);
+      // ...and the finding is still surfaced, not swallowed.
+      expect(result.preconditionFindings).toBeDefined();
+      expect(result.preconditionFindings![0]!.kinds).toContain("SOURCE_ID_MISMATCH");
+      expect(result.preconditionFindings![0]!.detail).toContain("SOURCE_ID_MISMATCH");
+      // No synthesized ratification anywhere in the decisive tally.
+      expect(result.ratifications.some((r) => r.content.includes("SOURCE_ID_MISMATCH"))).toBe(false);
+      expect(result.consensus.minorityReport).toBeUndefined();
     } finally {
       server.stop();
     }
   }, 30000);
 
-  test("(gate) shouldAttemptRepair is false for a REAL precondition block", async () => {
+  test("(regression, live 2026-07-13) an ACCEPT_WITH_EDITS slate with a fired precondition folds and ratifies", async () => {
+    const server = mockOpenRouter([
+      "Initial independent answer.",
+      JSON.stringify(PLANTED),
+      "CONSENSUS: ACCEPT_WITH_EDITS\nREQUIRED_EDITS: cite the build script explicitly.",
+      // the chair's fold of the required edits (A1) — reachable only because the
+      // precondition no longer synthesizes an absolute veto that gates repair/fold off.
+      "use Bun; the build script is `bun run build`.",
+    ]);
+    structuredSoloEnv(server.url);
+    try {
+      const result = await runModelCouncil({ prompt: "What is the build script?" });
+
+      // The exact production failure: this came back `blocked`, exit 1, with the member
+      // in BOTH lists and no fold.
+      expect(result.consensus.outcome).toBe("ratified_with_edits");
+      expect(councilOutcomeExitCode(result.consensus.outcome)).toBe(0);
+      expect(result.consensus.blockedBy).toEqual([]);
+      expect(result.consensus.acceptedWithEditsBy).toBeDefined();
+      expect(result.consensus.acceptedWithEditsBy!.length).toBeGreaterThan(0);
+      // No member may appear as both an edit-accepter and a blocker.
+      for (const member of result.consensus.acceptedWithEditsBy!) {
+        expect(result.consensus.blockedBy).not.toContain(member);
+      }
+      // The fold ran, and the finding rode along as a report.
+      expect(result.fold).toBeDefined();
+      expect(result.preconditionFindings![0]!.kinds).toContain("SOURCE_ID_MISMATCH");
+    } finally {
+      server.stop();
+    }
+  }, 30000);
+
+  test("(gate) a fired precondition yields a finding that carries no vote and never reaches the tally", async () => {
     process.env[FLAG] = "1";
-    const blocks = await evaluateRatificationPreconditions([proposal(PLANTED)], pack);
-    expect(blocks).toHaveLength(1);
-    // The absolute FACTUAL_ERROR veto turns repair off, so a re-ratify can never run
-    // and discard it.
-    expect(shouldAttemptRepair([...blocks, peerAccept])).toBe(false);
+    const findings = await evaluateRatificationPreconditions([proposal(PLANTED)], pack);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.member).toBe("Opus 4.8");
+    expect(findings[0]!.kinds).toEqual(["SOURCE_ID_MISMATCH"]);
+    // A finding is structurally incapable of entering the vote tally: it has no `vote`.
+    expect("vote" in findings[0]!).toBe(false);
+    // The slate the tally actually sees is just the members' votes — still repairable.
+    expect(shouldAttemptRepair([peerAccept])).toBe(false); // an all-accept slate needs no repair
   });
 
   test("(contrast) shouldAttemptRepair is true for a non-absolute block of the same slate shape", () => {
@@ -145,8 +190,8 @@ describe("M1 claim-ledger precondition reaches minorityReport + survives repair"
       accepted: false,
       vote: { decision: "block", blockKind: "INSUFFICIENT_EVIDENCE", raw: "BLOCK: INSUFFICIENT_EVIDENCE" },
     };
-    // Same shape (one block + one accept), but no absolute veto -> repairable. Proves
-    // the prior test's `false` is the veto's doing, not a constant of the slate.
+    // A real member block still routes through repair — proving the tests above pass
+    // because findings are out of the tally, not because repair stopped working.
     expect(shouldAttemptRepair([repairable, peerAccept])).toBe(true);
   });
 });

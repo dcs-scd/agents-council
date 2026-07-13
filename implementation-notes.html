@@ -39,6 +39,66 @@ live 2-member convene under <code>AGENTS_COUNCIL_STRUCTURED=1</code> and returne
 more consequential than the gate itself.</p>
 
 <div class="entry">
+  <h3>The entire structured parse-failure rate was one required schema key</h3>
+  <div class="meta">2026-07-13 14:40 <span class="tag heads-up">FYI</span></div>
+  <p>The live re-run verified the precondition fix but showed parse stats moving the <em>wrong</em> way:
+  5 ok / 3 fail, all three failures Opus's deliberation turns. Replaying the saved payloads through the real
+  zod schema (deterministic, no new API spend) gave one cause for all three:
+  <code>claims.N.evidence: expected array, received undefined</code>.</p>
+  <p><code>ClaimSchema.evidence</code> was a required <code>z.array(z.string())</code>, but the structured
+  prompt describes that field as the ids "<em>a repo_fact cites</em>". Opus omits the key on
+  <code>assumption</code> claims — a <b>correct</b> reading of the contract — and zod then rejected the entire
+  payload. ChatGPT happens to emit <code>evidence: []</code>, so it always passed. <b>The structured parse
+  rate was therefore a function of which model you seated, not of the protocol.</b> Fixed with
+  <code>.default([])</code>. A <code>repo_fact</code> that omits evidence still trips
+  <code>SOURCE_ID_MISMATCH</code> (<code>[]</code> cites nothing) — pinned by a test, so the tolerance does
+  not blunt the check.</p>
+  <p class="why"><b>Verified without a re-run:</b> replaying that run's six real payloads through the fixed
+  schema turns all six OK — so the measured 37.5% failure rate would have been <b>0% (8/8)</b>. Deterministic
+  proof against genuine model output beat spending another ~1.3M tokens on a fresh convene. A live re-measure
+  is still worth doing before any promotion decision, on the grounds that two runs is not a sample.</p>
+  <p><b>Also disproved, honestly:</b> I suspected the extractor grabbed the first ```json fence and collided
+  with prose that <em>discusses</em> json fences (the brief is about structured payloads, and Opus's reply
+  contains three). It does not — <code>extractStructuredPayload</code> already takes the <em>last</em> fence.
+  No change made. The fence-collision theory was wrong and the schema was the whole story.</p>
+</div>
+
+<div class="entry">
+  <h3>Fix landed: claim-ledger preconditions are findings, not votes — and the gate is now winnable</h3>
+  <div class="meta">2026-07-13 14:05 <span class="tag decision">DECISION</span></div>
+  <p>Operator ratified the non-veto class, so the fix went in. Reading the code first changed the
+  diagnosis: there were <b>two</b> defects, not one, and the deeper one was invisible from the transcript.</p>
+  <p><b>(1) The gate was unwinnable by construction.</b> <code>ClaimSchema</code> declared no
+  <code>cheapestVerification</code> field — the structured prompt never asked for one, and zod strips unknown
+  keys, so even a member that volunteered it had it deleted before the check ran. Every claim labeled
+  <code>assumption</code> therefore tripped <code>ASSUMPTION_NO_VERIFICATION</code> <em>unconditionally</em>,
+  and because the trip raised an absolute veto, any member honest enough to label an assumption killed the
+  council. <code>docs/council.md</code> had already noticed the field was missing and called the behavior
+  "conservative (all assumptions block)" — it wasn't conservative, it was fatal. Fixed by declaring
+  <code>cheapestVerification?: string</code> on <code>ClaimSchema</code> and asking for it in the structured
+  prompt, which is what makes the precondition a real gate rather than a tax on honest labeling.</p>
+  <p><b>(2) The engine forged votes.</b> A fired precondition synthesized a <code>block</code> ratification
+  carrying <code>BLOCK_KIND: FACTUAL_ERROR</code> <em>attributed to the member whose payload tripped it</em>.
+  Now: <code>ModelCouncilPreconditionFinding</code> (<code>{member, kinds[], detail}</code>) on
+  <code>result.preconditionFindings[]</code>, rendered in its own transcript section, never entering
+  <code>ratifications</code>, <code>blockedBy</code>, or the tally. Identical violations dedupe (the live run
+  emitted the same sentence seven times for one member); distinct ones are all kept.</p>
+  <p class="why"><b>Why not <code>minorityReport</code>, as I originally proposed:</b> A1 had just made that
+  field a BLOCK-only record of dissent. Putting a non-vote into it would re-pollute the exact field A1
+  purified. Findings get their own field and their own section instead — an <span class="tag tradeoff">OFF-SPEC</span>
+  deviation from my own stated plan, taken because the plan would have undone a fix from the night before.
+  <b>INV-4 is intact:</b> no member's veto was weakened — the engine simply may no longer cast one on a
+  member's behalf. A hand-cast <code>FACTUAL_ERROR</code> still blocks absolutely
+  (<code>modelCouncil.minorityReport.test.ts</code> still pins it).</p>
+  <p><b>Tests rewritten, not bent:</b> three tests pinned the old contract as intended behavior — including
+  <code>preconditionMinority.test.ts</code>, whose own comment read "the member accepts; the prepended
+  precondition veto still blocks." They now pin the new contract, plus today's live failure as an explicit
+  regression (AWE slate + fired precondition → <code>ratified_with_edits</code>, fold applied, member never in
+  <code>blockedBy</code>). Suite: <b>172 pass / 0 fail</b> (from 169); typecheck clean; format failing-set
+  unchanged.</p>
+</div>
+
+<div class="entry">
   <h3>Claim-ledger preconditions synthesize absolute vetoes that pre-empt <code>ratified_with_edits</code></h3>
   <div class="meta">2026-07-13 13:10 <span class="tag heads-up">FYI</span></div>
   <p>The first substantive live deliberation after landing came back <code>outcome: blocked</code> (exit 1) —

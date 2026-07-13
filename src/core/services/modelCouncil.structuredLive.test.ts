@@ -258,7 +258,7 @@ function mockOpenRouter(canned: string[]): { url: string; stop: () => void } {
   return { url: server.url.toString(), stop: () => server.stop(true) };
 }
 
-describe("D4 end-to-end — fenced SOURCE_ID_MISMATCH payload blocks; D3 stats reach the trace", () => {
+describe("D4 end-to-end — fenced SOURCE_ID_MISMATCH payload is reported as a finding; D3 stats reach the trace", () => {
   const pack: EvidencePackEntry[] = [{ id: "EV-1", text: "The repo uses Bun.", source: "package.json" }];
 
   // The D1 contract reply: legacy markers, then the fenced payload whose
@@ -288,7 +288,7 @@ describe("D4 end-to-end — fenced SOURCE_ID_MISMATCH payload blocks; D3 stats r
     await rm(outDir, { recursive: true, force: true });
   });
 
-  test("a mismatched source id in a fenced payload produces the synthetic FACTUAL_ERROR block", async () => {
+  test("a mismatched source id in a fenced payload produces a claim-ledger finding, not a block", async () => {
     const server = mockOpenRouter(["Initial independent answer.", deliberationReply, ratificationReply]);
     process.env[FLAG] = "1";
     process.env.AGENTS_COUNCIL_MEMBERS = "kimi";
@@ -301,13 +301,13 @@ describe("D4 end-to-end — fenced SOURCE_ID_MISMATCH payload blocks; D3 stats r
     try {
       const result = await runModelCouncil({ prompt: "What is the build script?", evidencePack: pack });
 
-      // D4: the WU-B2 precondition fired on the fenced payload — a synthetic
-      // FACTUAL_ERROR block is visible in the ratification result.
-      expect(result.consensus.outcome).toBe("blocked");
-      const block = result.ratifications.find((entry) => entry.content.includes("SOURCE_ID_MISMATCH"));
-      expect(block).toBeDefined();
-      expect(block!.vote.decision).toBe("block");
-      expect(block!.vote.blockKind).toBe("FACTUAL_ERROR");
+      // D4 (revised 2026-07-13): the WU-B2 precondition fired on the fenced payload and is
+      // reported as an evidence-hygiene finding. It no longer synthesizes a FACTUAL_ERROR
+      // veto in the member's name, so the member's own ACCEPT decides the outcome.
+      expect(result.consensus.outcome).toBe("ratified");
+      expect(result.preconditionFindings).toBeDefined();
+      expect(result.preconditionFindings![0]!.kinds).toContain("SOURCE_ID_MISMATCH");
+      expect(result.ratifications.some((entry) => entry.content.includes("SOURCE_ID_MISMATCH"))).toBe(false);
       // D2: the live candidate came from the structured payload, not the raw reply.
       expect(result.candidateConsensus).toBe("use Bun");
 

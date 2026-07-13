@@ -204,21 +204,46 @@ export type ModelCouncilRatification = ModelCouncilResponse & {
 export type ModelCouncilConsensusOutcome = "ratified" | "ratified_with_edits" | "blocked" | "not_attempted";
 
 // The process exit-code contract for a finished council run (WU-B4). A `blocked`
-// outcome is a hard stop — an absolute veto or an unresolved claim-ledger
-// precondition — so the caller must see a non-zero exit; `ratified`,
-// `ratified_with_edits` (A1), and `not_attempted` are non-error completions.
-// Extracted as a pure function so the veto -> non-zero-exit invariant is
+// outcome is a hard stop — an absolute veto cast BY A MEMBER — so the caller must
+// see a non-zero exit; `ratified`, `ratified_with_edits` (A1), and `not_attempted`
+// are non-error completions. Claim-ledger preconditions no longer force `blocked`
+// (see ModelCouncilPreconditionFinding); they are evidence-hygiene findings, not
+// votes. Extracted as a pure function so the veto -> non-zero-exit invariant is
 // unit-testable without spawning the CLI (the `solve` action sets
 // `process.exitCode` from this).
 export function councilOutcomeExitCode(outcome: ModelCouncilConsensusOutcome): number {
   return outcome === "blocked" ? 1 : 0;
 }
 
+// A claim-ledger precondition that fired against a member's structured claims
+// (WU-B2, revised 2026-07-13). This is a FINDING, not a vote.
+//
+// It previously synthesized a `block` ratification carrying BLOCK_KIND:
+// FACTUAL_ERROR and attributed it to the member whose payload tripped it. Three
+// things were wrong with that, all observed live under AGENTS_COUNCIL_STRUCTURED:
+//   1. It forged a vote. A member that voted ACCEPT_WITH_EDITS was recorded in
+//      BOTH `acceptedWithEditsBy` and `blockedBy` — a self-contradictory transcript,
+//      and precisely the misclassification A1 exists to prevent.
+//   2. FACTUAL_ERROR is the absolute-veto kind, so an evidence-hygiene lapse
+//      (an unlabeled claim) short-circuited repair AND the A1 edit-fold, and exited
+//      non-zero. A missing provenance label is not a factual error.
+//   3. ASSUMPTION_NO_VERIFICATION was unsatisfiable: ClaimSchema carried no
+//      cheapestVerification field, so every assumption tripped it unconditionally.
+//      (Fixed in schemas.ts + the structured prompt; the check is now winnable.)
+// Findings are surfaced on the result and in the transcript, and never touch the
+// vote tally. Deliberately NOT folded into `minorityReport`, which A1 made a
+// BLOCK-only record — a non-vote does not belong in a record of dissent.
+export type ModelCouncilPreconditionFinding = {
+  member: string;
+  kinds: RatificationPrecondition["kind"][];
+  detail: string;
+};
+
 // A single recorded dissent in the minority report (WU-B4). Each entry is the
 // stated objection of one member who withheld acceptance — including a member
-// whose block carries an absolute veto (FACTUAL_ERROR / MATERIAL_DISAGREEMENT),
-// which is how the WU-B2 claim-ledger preconditions surface: those preconditions
-// raise a synthetic FACTUAL_ERROR ratification, so they appear here as dissent.
+// whose block carries an absolute veto (FACTUAL_ERROR / MATERIAL_DISAGREEMENT).
+// Every entry corresponds to a vote a member actually cast; the engine never
+// synthesizes one on a member's behalf.
 // The minority report is an additional field on the result, NOT a new outcome
 // state — the top-level enum stays frozen at not_attempted|ratified|blocked (INV-6).
 export type MinorityReportEntry = {
@@ -347,6 +372,10 @@ export type ModelCouncilResult = {
   // AGENTS_COUNCIL_STRUCTURED run recorded at least one outcome; never present
   // flag-off, so the legacy result JSON is unchanged.
   structuredParseStats?: StructuredParseStat[];
+  // WU-B2: claim-ledger evidence-hygiene findings. Reported, never voted — they do
+  // not appear in any vote tally and cannot change the outcome. Present only when a
+  // precondition fired (AGENTS_COUNCIL_STRUCTURED only); absent flag-off.
+  preconditionFindings?: ModelCouncilPreconditionFinding[];
 };
 
 // WU-B3: the record of one member dropped terminally mid-run. `round` is null for
@@ -629,23 +658,21 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
     ? await ratifyCandidate(state, prompt, rounds, candidateConsensus, input.evidencePack)
     : [];
 
-  // WU-B2: claim-ledger ratification preconditions. Under AGENTS_COUNCIL_STRUCTURED
-  // only (INV-2), inspect the structured claims the members emitted and prepend an
-  // absolute FACTUAL_ERROR block (via the existing veto machinery) for any member
-  // that emitted an unlabeled claim, an assumption with no cheapest_verification,
-  // or a repo_fact citing an id absent from the evidence pack (INV-9: pure code).
-  // With the flag off this is a no-op (returns []) and never imports the schema
-  // module, so the ratification path stays byte-for-byte legacy. INV-3: these
-  // blocks enter only the ratifications array, after the deliberation loop;
-  // isConverged is never given them. An absolute veto here also short-circuits the
-  // repair cycle below (shouldAttemptRepair), since synthesis cannot make an
-  // unverifiable claim verifiable.
-  if (hasCandidate) {
-    const preconditionBlocks = await evaluateRatificationPreconditions(deliberations, input.evidencePack);
-    if (preconditionBlocks.length > 0) {
-      ratifications = [...preconditionBlocks, ...ratifications];
-    }
-  }
+  // WU-B2: claim-ledger evidence-hygiene preconditions (revised 2026-07-13). Under
+  // AGENTS_COUNCIL_STRUCTURED only (INV-2), inspect the structured claims the members
+  // emitted and record a FINDING for any member that emitted an unlabeled claim, an
+  // assumption with no cheapestVerification, or a repo_fact citing an id absent from
+  // the evidence pack (INV-9: pure code). With the flag off this is a no-op (returns
+  // []) and never imports the schema module, so the path stays byte-for-byte legacy.
+  //
+  // These findings do NOT enter `ratifications`. They previously synthesized an
+  // absolute FACTUAL_ERROR veto attributed to the member, which forged a vote the
+  // member never cast, short-circuited both repair and the A1 edit-fold, and exited
+  // non-zero — turning a unanimous ACCEPT_WITH_EDITS slate into `blocked`. Hygiene
+  // findings are reported, not voted; the members' own votes decide the outcome.
+  const preconditionFindings = hasCandidate
+    ? await evaluateRatificationPreconditions(deliberations, input.evidencePack)
+    : [];
 
   // Consensus repair (one bounded cycle). The council reasons in prose, so two
   // members who agree on substance routinely fail to emit byte-identical drafts
@@ -744,6 +771,7 @@ export async function runModelCouncil(input: RunModelCouncilInput): Promise<Mode
     // D3: flag-on only — a flag-off run records nothing, so the field is absent
     // and the legacy result/JSON stays byte-identical.
     ...(state.parseStats.length > 0 ? { structuredParseStats: state.parseStats } : {}),
+    ...(preconditionFindings.length > 0 ? { preconditionFindings } : {}),
   };
   // WU-B2: the run completed — the checkpoint's crash insurance is no longer
   // needed, so remove it. (A thrown failure above leaves it in place for the
@@ -1210,6 +1238,16 @@ export function formatModelCouncilMarkdown(result: ModelCouncilResult): string {
     `- Blocked by: ${result.consensus.blockedBy.join(", ") || "none"}`,
     ...(result.solo ? ["- Solo council: yes (quorum waived; self-ratified)"] : []),
     "",
+    // WU-B2: hygiene findings are reported next to the vote tally but deliberately
+    // outside it — they name a member without implying that member voted anything.
+    ...(result.preconditionFindings && result.preconditionFindings.length > 0
+      ? [
+          "## Claim-ledger findings (evidence hygiene — not votes)",
+          "",
+          ...result.preconditionFindings.map((finding) => `- **${finding.member}** — ${finding.detail}`),
+          "",
+        ]
+      : []),
     "## Convergence",
     "",
     formatConvergenceTrend(result.rounds),
@@ -1300,8 +1338,9 @@ export function formatModelCouncilMarkdown(result: ModelCouncilResult): string {
   }
 
   // Minority report (WU-B4): a first-class, consolidated record of the blocking
-  // dissents, rendered only on a `blocked` outcome so the minority's objections —
-  // including a WU-B2 claim-ledger FACTUAL_ERROR precondition — are never dropped.
+  // dissents, rendered only on a `blocked` outcome so the minority's objections are
+  // never dropped. Every entry is a vote a member cast; claim-ledger preconditions
+  // are hygiene findings and render in their own section, not here.
   const minorityReport = result.consensus.minorityReport;
   if (result.consensus.outcome === "blocked" && minorityReport && minorityReport.length > 0) {
     lines.push("", "## Minority Report");
@@ -2523,7 +2562,7 @@ function formatEvidencePack(evidencePack: EvidencePackEntry[]): string {
 const STRUCTURED_DELIBERATION_INSTRUCTION = [
   "Additionally, after the CANDIDATE_CONSENSUS: section, repeat your position as a structured payload in a fenced ```json code block, matching exactly this shape:",
   "```json",
-  '{ "candidateConsensus": "<the exact candidate consensus text>", "claims": [{ "id": "c1", "text": "<one factual claim backing the candidate>", "provenance": "repo_fact" | "source_claim" | "assumption", "evidence": ["<the evidence-pack id(s) a repo_fact cites, else empty>"] }], "consensusStatus": "converged" | "diverged", "materialDisagreements": ["<each material disagreement>"] }',
+  '{ "candidateConsensus": "<the exact candidate consensus text>", "claims": [{ "id": "c1", "text": "<one factual claim backing the candidate>", "provenance": "repo_fact" | "source_claim" | "assumption", "evidence": ["<the evidence-pack id(s) a repo_fact cites, else empty>"], "cheapestVerification": "<REQUIRED for an assumption: the cheapest way to verify it; omit for other provenance>" }], "consensusStatus": "converged" | "diverged", "materialDisagreements": ["<each material disagreement>"] }',
   "```",
   "The marker sections above remain required; the JSON payload is additive.",
 ].join("\n");
@@ -3061,43 +3100,36 @@ export function evaluateClaimLedgerPreconditions(
   return fired;
 }
 
-// Synthesize a block ratification carrying the existing FACTUAL_ERROR kind from a
-// fired precondition. Attributed to the member whose payload tripped it so the
-// transcript and minority report (WU-B4) can name the source.
-function preconditionBlockRatification(
+// Record a fired precondition as a finding against the member whose payload tripped
+// it, so the transcript names the source. Deduplicated by kind: a member that emits
+// six unlabeled claims produces one finding listing UNLABELED_CLAIM once, not six
+// identical strings (the live 2026-07-13 run produced seven copies of the same
+// sentence). This synthesizes NO vote — see ModelCouncilPreconditionFinding.
+function preconditionFinding(
   member: MemberRef,
   preconditions: RatificationPrecondition[],
-): ModelCouncilRatification {
-  const detail = preconditions.map((p) => `${p.kind}: ${p.detail}`).join("; ");
-  return {
-    member,
-    content: `CONSENSUS: BLOCK\nBLOCK_KIND: FACTUAL_ERROR\nClaim-ledger precondition(s) failed: ${detail}`,
-    accepted: false,
-    vote: {
-      decision: "block",
-      blockKind: "FACTUAL_ERROR",
-      raw: `claim-ledger precondition: ${detail}`,
-    },
-  };
+): ModelCouncilPreconditionFinding {
+  const kinds = [...new Set(preconditions.map((p) => p.kind))];
+  const detail = [...new Set(preconditions.map((p) => `${p.kind}: ${p.detail}`))].join("; ");
+  return { member: member.name, kinds, detail };
 }
 
 // Flag-gated applier: under AGENTS_COUNCIL_STRUCTURED only, parse each member's
 // final-round content for structured claims (via the WU-B1 guarded dynamic
 // import — never a top-level static import), run the pure preconditions against
-// the evidence-pack ids, and return one synthetic FACTUAL_ERROR block per member
-// that tripped a precondition. Flag OFF (INV-2): returns [] WITHOUT importing the
-// schema module or inspecting any label — the legacy ratification path is then
-// byte-for-byte unchanged.
+// the evidence-pack ids, and return one finding per member that tripped one.
+// Flag OFF (INV-2): returns [] WITHOUT importing the schema module or inspecting
+// any label — the legacy ratification path is then byte-for-byte unchanged.
 export async function evaluateRatificationPreconditions(
   proposals: ModelCouncilCandidateProposal[],
   evidencePack: EvidencePackEntry[] | undefined,
-): Promise<ModelCouncilRatification[]> {
+): Promise<ModelCouncilPreconditionFinding[]> {
   if (!isStructuredCouncilEnabled()) {
     return [];
   }
   const { parseStructuredOrFallback, DeliberationResponseSchema } = await import("./council/schemas");
   const evidencePackIds = new Set((evidencePack ?? []).map((entry) => entry.id));
-  const blocks: ModelCouncilRatification[] = [];
+  const findings: ModelCouncilPreconditionFinding[] = [];
   for (const proposal of proposals) {
     // Extract structured claims if the member emitted a parseable structured
     // payload (D1: a fenced ```json block alongside the legacy markers, or a bare
@@ -3110,10 +3142,10 @@ export async function evaluateRatificationPreconditions(
     }
     const fired = evaluateClaimLedgerPreconditions(parsed.claims as ClaimLike[], evidencePackIds);
     if (fired.length > 0) {
-      blocks.push(preconditionBlockRatification(proposal.member, fired));
+      findings.push(preconditionFinding(proposal.member, fired));
     }
   }
-  return blocks;
+  return findings;
 }
 
 // A4: nominate the round's shared candidate from the members' drafts. Nomination
@@ -3384,9 +3416,9 @@ export function buildConsensusResult(
   // outcome is self-explaining — a hard stop, not a repairable "ACCEPT after edits".
   const veto = ratifications.find(isAbsoluteVeto);
   // Minority report (WU-B4): every BLOCK becomes a first-class record, so the
-  // blocking objections — including a WU-B2 claim-ledger FACTUAL_ERROR precondition,
-  // which is itself a blocking ratification — are never silently dropped on a
-  // `blocked` outcome. An ACCEPT_WITH_EDITS voter is excluded (it did not block).
+  // blocking objections are never silently dropped on a `blocked` outcome. An
+  // ACCEPT_WITH_EDITS voter is excluded (it did not block), and no engine-synthesized
+  // pseudo-vote can appear here — only ratifications members actually cast.
   // Keyed off `blocked` only; consumers key on the top-level `outcome`.
   const minorityReport: MinorityReportEntry[] = ratifications
     .filter((ratification) => ratification.vote.decision === "block")

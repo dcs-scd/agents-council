@@ -33,7 +33,19 @@ export const ClaimSchema = z.object({
   id: z.string().min(1),
   text: z.string().min(1),
   provenance: ProvenanceSchema,
-  evidence: z.array(z.string()),
+  // Defaults to [] when omitted. The prompt describes this field as the ids "a repo_fact
+  // cites", so a model that omits it on an `assumption` or `source_claim` is reading the
+  // contract correctly — but a bare z.array() made the key mandatory and rejected the WHOLE
+  // payload. Live, that was the entire structured parse-failure rate: Opus omits the key on
+  // assumptions, ChatGPT emits `[]`, so the parse rate depended on which model you seated.
+  // A missing `evidence` on a repo_fact still trips SOURCE_ID_MISMATCH — [] cites nothing.
+  evidence: z.array(z.string()).default([]),
+  // How an `assumption` would be cheapest verified. The WU-B2 precondition demands
+  // this of every assumption, but the field was absent from the schema — and zod
+  // strips unknown keys, so a member that volunteered it had it deleted before the
+  // check ran. Every assumption therefore tripped ASSUMPTION_NO_VERIFICATION
+  // unconditionally. Declaring the field is what makes that precondition satisfiable.
+  cheapestVerification: z.string().optional(),
   // Optional free-form severity label (e.g. "high"/"low"); WU-B2 interprets it.
   severity: z.string().optional(),
 });

@@ -59,9 +59,21 @@ describe("WU-B2 claim-ledger preconditions — pure core (INV-9)", () => {
     expect(fired.map((f) => f.kind)).toEqual(["SOURCE_ID_MISMATCH"]);
   });
 
-  test("an assumption (no cheapest_verification field in the schema) fires ASSUMPTION_NO_VERIFICATION", () => {
+  test("an assumption with no cheapestVerification fires ASSUMPTION_NO_VERIFICATION", () => {
     const fired = evaluateClaimLedgerPreconditions([{ provenance: "assumption", evidence: [] }], packIds);
     expect(fired.map((f) => f.kind)).toEqual(["ASSUMPTION_NO_VERIFICATION"]);
+  });
+
+  // The check used to be unwinnable: ClaimSchema declared no cheapestVerification field, so
+  // zod stripped it from every payload and EVERY assumption fired. The field now exists, so a
+  // member that states its cheapest verification passes — which is what makes the precondition
+  // a real gate rather than a tax on honest labeling.
+  test("an assumption that states its cheapestVerification fires nothing", () => {
+    const fired = evaluateClaimLedgerPreconditions(
+      [{ provenance: "assumption", evidence: [], cheapestVerification: "run `bun run build` and read the exit code" }],
+      packIds,
+    );
+    expect(fired).toEqual([]);
   });
 
   test("an unlabeled claim fires UNLABELED_CLAIM", () => {
@@ -92,16 +104,75 @@ describe("WU-B2 ratification precondition applier — real flag-gated path", () 
     ],
   };
 
-  test("flag ON: a planted repo_fact citing a non-existent pack id is surfaced as a FACTUAL_ERROR block", async () => {
+  // Revised 2026-07-13: a fired precondition is an evidence-hygiene FINDING attributed to the
+  // member whose payload tripped it — NOT a synthesized FACTUAL_ERROR veto cast in that
+  // member's name. See modelCouncil.preconditionMinority.test.ts for why the veto shape was
+  // wrong (it forged votes and turned unanimous ACCEPT_WITH_EDITS slates into `blocked`).
+  test("flag ON: a planted repo_fact citing a non-existent pack id is surfaced as a finding, not a vote", async () => {
     process.env[FLAG] = "1";
-    const blocks = await evaluateRatificationPreconditions([proposal(plantedRepoFact)], pack);
-    expect(blocks).toHaveLength(1);
-    const block = blocks[0]!;
-    expect(block.vote.decision).toBe("block");
-    expect(block.vote.blockKind).toBe("FACTUAL_ERROR");
-    expect(block.accepted).toBe(false);
-    expect(block.content).toContain("SOURCE_ID_MISMATCH");
-    expect(block.member.name).toBe("Opus 4.8");
+    const findings = await evaluateRatificationPreconditions([proposal(plantedRepoFact)], pack);
+    expect(findings).toHaveLength(1);
+    const finding = findings[0]!;
+    expect(finding.kinds).toEqual(["SOURCE_ID_MISMATCH"]);
+    expect(finding.detail).toContain("SOURCE_ID_MISMATCH");
+    expect(finding.member).toBe("Opus 4.8");
+    // Structurally not a ballot: nothing here can enter the vote tally.
+    expect("vote" in finding).toBe(false);
+    expect("accepted" in finding).toBe(false);
+  });
+
+  // Identical violations collapse; distinct ones survive. The live run emitted the SAME
+  // ASSUMPTION_NO_VERIFICATION sentence seven times for one member — that is noise. Two
+  // repo_facts failing for different reasons (a bad id vs. no id at all) are two facts,
+  // and both are kept.
+  test("flag ON: identical violations collapse to one line; distinct violations are both kept", async () => {
+    process.env[FLAG] = "1";
+    const twoIdenticalAssumptions = proposal({
+      candidateConsensus: "use Bun",
+      claims: [
+        { id: "c1", text: "probably fast", provenance: "assumption", evidence: [] },
+        { id: "c2", text: "probably stable", provenance: "assumption", evidence: [] },
+      ],
+    });
+    const collapsed = await evaluateRatificationPreconditions([twoIdenticalAssumptions], pack);
+    expect(collapsed[0]!.kinds).toEqual(["ASSUMPTION_NO_VERIFICATION"]);
+    expect(collapsed[0]!.detail.match(/ASSUMPTION_NO_VERIFICATION/g)).toHaveLength(1);
+
+    // plantedRepoFact's two claims trip the same KIND for different REASONS — one kind, two lines.
+    const distinct = await evaluateRatificationPreconditions([proposal(plantedRepoFact)], pack);
+    expect(distinct[0]!.kinds).toEqual(["SOURCE_ID_MISMATCH"]);
+    expect(distinct[0]!.detail.match(/SOURCE_ID_MISMATCH/g)).toHaveLength(2);
+  });
+
+  // Regression, live 2026-07-13: `evidence` was a required array, but the prompt describes it
+  // as the ids "a repo_fact cites". Opus omitted the key on assumption claims — a correct reading
+  // — and zod rejected the ENTIRE payload, which was 100% of that run's structured parse failures
+  // (3/3 of one member's deliberation turns). It now defaults to [].
+  test("flag ON: a claim that omits `evidence` still parses; an assumption with a stated verification is clean", async () => {
+    process.env[FLAG] = "1";
+    const omitsEvidence = proposal({
+      candidateConsensus: "use Bun",
+      claims: [
+        // no `evidence` key at all — exactly what Opus emitted live.
+        { id: "c1", text: "bun is likely faster here", provenance: "assumption", cheapestVerification: "time both" },
+        { id: "c2", text: "the repo uses Bun", provenance: "repo_fact", evidence: ["EV-1"] },
+      ],
+    });
+    // Parses (no longer rejected wholesale) AND is clean: the assumption states its verification,
+    // the repo_fact cites a present id.
+    expect(await evaluateRatificationPreconditions([omitsEvidence], pack)).toEqual([]);
+  });
+
+  // ...but tolerance must not blunt the check: a repo_fact that omits `evidence` cites nothing.
+  test("flag ON: a repo_fact that omits `evidence` still fires SOURCE_ID_MISMATCH", async () => {
+    process.env[FLAG] = "1";
+    const uncited = proposal({
+      candidateConsensus: "use Bun",
+      claims: [{ id: "c1", text: "the build script is `bun run x`", provenance: "repo_fact" }],
+    });
+    const findings = await evaluateRatificationPreconditions([uncited], pack);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.kinds).toEqual(["SOURCE_ID_MISMATCH"]);
   });
 
   test("flag ON: a clean repo_fact citing a present id raises no block", async () => {

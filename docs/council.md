@@ -465,22 +465,34 @@ in `src/core/services/council/schemas.ts`:
 Zod is bundled into the compiled `dist/council` binary even though it is a `devDependency`
 (verified by parsing from the compiled binary with `node_modules/zod` removed).
 
-### Provenance / Level-1 source-ID block precondition
+### Provenance / Level-1 source-ID claim-ledger findings
 
 When structured, before ratification the council runs **pure, deterministic** claim-ledger
-preconditions (no LLM, no sandbox, no network). A tripped check raises a single absolute
-`FACTUAL_ERROR` block via the existing veto machinery — it does **not** introduce a new veto
-kind and does **not** weaken any veto's absoluteness. The checks:
+preconditions (no LLM, no sandbox, no network). The checks:
 
 1. **`SOURCE_ID_MISMATCH` (Level-1 source-ID, the real Wave-B deliverable):** a `repo_fact`
    claim whose cited evidence-pack id is **absent from (or empty against) the supplied evidence
-   pack** is blocked. This is the deterministic source-ID precondition described in Addendum
-   A.3.3.
+   pack**. This is the deterministic source-ID precondition described in Addendum A.3.3.
 2. **`UNLABELED_CLAIM`:** a factual claim with no provenance label.
-3. **`ASSUMPTION_NO_VERIFICATION`:** an `assumption` with no stated cheapest verification.
+3. **`ASSUMPTION_NO_VERIFICATION`:** an `assumption` with no stated `cheapestVerification`.
 
-Blocks enter only the `ratifications` array; they are **never** fed to the convergence
-controller (`isConverged`).
+**These are findings, not votes (revised 2026-07-13).** A tripped check appends a
+`ModelCouncilPreconditionFinding` to `result.preconditionFindings[]` (`{member, kinds[], detail}`)
+and renders under **"Claim-ledger findings (evidence hygiene — not votes)"** in the Markdown
+transcript. It does **not** enter `ratifications`, `blockedBy`, or `minorityReport`, and it
+cannot change the outcome. Identical violations are deduplicated; distinct ones are all kept.
+
+> **Why this changed.** Each tripped check used to synthesize an absolute `FACTUAL_ERROR` block
+> *attributed to the member whose payload tripped it*. The first substantive live run under the
+> flag exposed three faults: it forged a vote (a member that voted `ACCEPT_WITH_EDITS` appeared in
+> **both** `acceptedWithEditsBy` and `blockedBy`); an evidence-hygiene lapse got the absolute-veto
+> kind, which short-circuits both repair and the A1 edit-fold and exits non-zero; and
+> `ASSUMPTION_NO_VERIFICATION` was **unsatisfiable** — `ClaimSchema` had no `cheapestVerification`
+> field, so zod stripped it and *every* assumption tripped the check unconditionally. The field now
+> exists in the schema and in the structured prompt, so the check is winnable. A member's own veto
+> is untouched: a hand-cast `FACTUAL_ERROR` still blocks absolutely.
+
+Findings are **never** fed to the convergence controller (`isConverged`).
 
 **Wave-B heuristic boundaries (FYI — to revisit at the Wave-C entry gate):**
 
@@ -489,10 +501,14 @@ controller (`isConverged`).
   back to legacy. The check fires only when the pure function is invoked with loosely-typed
   claims. End-to-end "unverifiable repo claim" coverage is therefore carried by the
   `SOURCE_ID_MISMATCH` check (a `repo_fact` with absent/empty evidence).
-- `ASSUMPTION_NO_VERIFICATION` currently fires for **every** `assumption`, because `ClaimSchema`
-  carries no `cheapest_verification` field for an assumption to populate. Net behavior is
-  conservative (all assumptions block). Closing this B1↔B2 contract gap means adding a field to
-  the frozen schema and is deferred.
+- ~~`ASSUMPTION_NO_VERIFICATION` currently fires for **every** `assumption`, because `ClaimSchema`
+  carries no `cheapest_verification` field for an assumption to populate.~~ **Closed 2026-07-13.**
+  The B1↔B2 contract gap was not "conservative" — it was unwinnable, and because the check raised
+  an *absolute veto*, every council in which any member honestly labeled an assumption came back
+  `blocked` with repair and the edit-fold short-circuited. `ClaimSchema` now carries
+  `cheapestVerification?: string` and the structured prompt asks for it, so the check is
+  satisfiable; and preconditions are findings rather than vetoes, so a trip no longer decides the
+  outcome.
 
 ### Evidence-pack input
 
@@ -527,8 +543,9 @@ default applies only when the override is unset.
 
 The consensus result carries an optional `minorityReport[]` of `MinorityReportEntry`
 (`{ member, blockKind, absolute, dissent }`), populated from the non-accepted ratifications
-**only on a `blocked` outcome** (including a claim-ledger `FACTUAL_ERROR` precondition block,
-which is itself a blocking ratification). `formatModelCouncilMarkdown` renders a
+**only on a `blocked` outcome**. Every entry is a vote a member actually cast — the engine never
+synthesizes one on a member's behalf, so claim-ledger preconditions do not appear here (they are
+findings; see above). `formatModelCouncilMarkdown` renders a
 `## Minority Report` section on `blocked` only; `ratified` and `not_attempted` carry no report
 and render no section. The `council solve` CLI sets a **non-zero exit code** on a `blocked`
 outcome (exit 0 on `ratified` / `not_attempted`).

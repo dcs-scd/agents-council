@@ -94,9 +94,10 @@ const main = async (): Promise<void> => {
         } else {
           console.log(formatModelCouncilMarkdown(result));
         }
-        // A blocked council is a hard stop (an absolute veto or an unresolved
-        // claim-ledger precondition), so the run must signal failure to its caller
-        // (WU-B4). Ratified / not_attempted are non-error completions (exit 0).
+        // A blocked council is a hard stop — an absolute veto cast BY A MEMBER — so the
+        // run must signal failure to its caller (WU-B4). Claim-ledger preconditions are
+        // hygiene findings and never force a non-zero exit. Ratified / ratified_with_edits
+        // / not_attempted are non-error completions (exit 0).
         // The outcome -> exit-code map is the unit-tested councilOutcomeExitCode.
         process.exitCode = councilOutcomeExitCode(result.consensus.outcome);
       } catch (error) {
