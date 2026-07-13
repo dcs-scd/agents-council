@@ -2943,6 +2943,89 @@ async function structuredRoundSignals(round: ModelCouncilRound): Promise<Consens
   return Promise.all(round.proposals.map((proposal) => parseConsensusSignalStructured(proposal.content)));
 }
 
+// --- Two-channel fusion (the structured payload is ADDITIVE, not a replacement) ---
+//
+// STRUCTURED_DELIBERATION_INSTRUCTION / _RATIFICATION_INSTRUCTION both end with "the
+// marker sections above remain required; the JSON payload is additive." So under the flag
+// every reply carries TWO channels saying the same thing — and the original wrappers read
+// only the JSON, discarding the prose they had just demanded.
+//
+// That is a silent-wrong-verdict hazard, and it runs in the dangerous direction. A member
+// can write `CONSENSUS: BLOCK / BLOCK_KIND: FACTUAL_ERROR` in prose and `{"decision":
+// "accept"}` in its fence — the engine erases an absolute veto while the human reads the
+// veto in the transcript. Same for convergence: `"consensusStatus": "converged",
+// "materialDisagreements": []` over prose that argues the opposite stops deliberation early.
+// The council convened on 2026-07-13 produced exactly that specimen from its own round 3.
+//
+// A disagreement between the two channels is not a "which one wins" question — it is
+// evidence the reply is internally inconsistent, and the only safe reading is the
+// conservative one. So both fusions are FAIL-SAFE: they resolve toward more deliberation
+// and toward keeping a veto, never toward silently ratifying. `unknown` / a silent prose
+// channel is neutral, so a reply that carries only the JSON fuses to exactly the JSON —
+// the no-prose-channel case is byte-for-byte unchanged.
+
+const RATIFICATION_DECISION_SEVERITY: Record<RatificationDecision, number> = {
+  accept: 0,
+  accept_with_edits: 1,
+  block: 2,
+};
+
+// True when the reply carries an explicit CONSENSUS: marker line (same tolerant scan as
+// parseRatificationVote). This distinguishes "the member voted BLOCK in prose" from "the
+// member wrote no marker at all" — the legacy parser maps BOTH to a block (markerless =>
+// PROTOCOL block). That is the right fail-safe when prose is the only channel, but it would
+// manufacture a false veto here: under the flag, a member that emits a clean JSON vote and
+// omits the marker line HAS communicated its vote. Only a marker-backed prose vote fuses.
+function hasProseRatificationMarker(content: string): boolean {
+  return content
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^[>*_`#\s-]+/, ""))
+    .some((line) => /^CONSENSUS:\s*(ACCEPT_WITH_EDITS|ACCEPT|BLOCK)\b/i.test(line));
+}
+
+// Take the stricter of the two channels (block > accept_with_edits > accept). The strict
+// side supplies the decision; the other side backfills a blockKind / requiredEdits it left
+// out, so a member that stated its reason in only one channel still stated it.
+export function fuseRatificationVotes(
+  structured: RatificationVote,
+  prose: RatificationVote,
+  proseMarkerPresent: boolean,
+): RatificationVote {
+  if (!proseMarkerPresent) {
+    return structured;
+  }
+  const proseIsStricter =
+    RATIFICATION_DECISION_SEVERITY[prose.decision] > RATIFICATION_DECISION_SEVERITY[structured.decision];
+  const winner = proseIsStricter ? prose : structured;
+  const other = proseIsStricter ? structured : prose;
+  return {
+    decision: winner.decision,
+    blockKind: winner.decision === "block" ? (winner.blockKind ?? other.blockKind) : undefined,
+    requiredEdits: winner.decision === "accept_with_edits" ? (winner.requiredEdits ?? other.requiredEdits) : undefined,
+    raw: structured.raw,
+  };
+}
+
+// `diverged` is absorbing; a material disagreement raised in either channel counts (it
+// suppresses convergence in isConverged on its own); `converged` survives only when nothing
+// contradicts it.
+export function fuseConsensusSignals(structured: ConsensusSignal, prose: ConsensusSignal): ConsensusSignal {
+  const status: ConsensusReportStatus =
+    structured.status === "diverged" || prose.status === "diverged"
+      ? "diverged"
+      : structured.status === "converged" || prose.status === "converged"
+        ? "converged"
+        : "unknown";
+  const disagreements = [structured.disagreements, prose.disagreements]
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0 && !/^NONE$/i.test(entry));
+  return {
+    status,
+    hasMaterialDisagreements: structured.hasMaterialDisagreements || prose.hasMaterialDisagreements,
+    disagreements: [...new Set(disagreements)].join("; "),
+  };
+}
+
 export async function parseRatificationVoteStructured(
   content: string,
   onOutcome?: (outcome: StructuredParseOutcome) => void,
@@ -2964,7 +3047,11 @@ export async function parseRatificationVoteStructured(
   onOutcome?.("ok");
   // The structured schema omits `raw`; rehydrate the legacy shape so downstream
   // consumers (which read `vote.raw`) keep working.
-  return { ...structured, raw: content };
+  return fuseRatificationVotes(
+    { ...structured, raw: content },
+    parseRatificationVote(content),
+    hasProseRatificationMarker(content),
+  );
 }
 
 export async function parseConsensusSignalStructured(
@@ -2986,12 +3073,12 @@ export async function parseConsensusSignalStructured(
     return parseConsensusSignal(content);
   }
   onOutcome?.("ok");
-  const disagreements = (parsed.materialDisagreements ?? []).join("; ");
-  return {
+  const structured: ConsensusSignal = {
     status: parsed.consensusStatus ?? "unknown",
     hasMaterialDisagreements: (parsed.materialDisagreements ?? []).length > 0,
-    disagreements,
+    disagreements: (parsed.materialDisagreements ?? []).join("; "),
   };
+  return fuseConsensusSignals(structured, parseConsensusSignal(content));
 }
 
 export async function parseCandidateConsensusStructured(

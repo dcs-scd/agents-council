@@ -7,6 +7,8 @@ import path from "node:path";
 import {
   buildDeliberationMessages,
   buildRatificationMessages,
+  fuseConsensusSignals,
+  fuseRatificationVotes,
   isConverged,
   parseCandidateConsensusStructured,
   parseConsensusSignalStructured,
@@ -27,8 +29,10 @@ import {
 //        (flag-gated; flag off the prompts are BYTE-identical to the merged base,
 //        pinned below by sha256 of the canonical message JSON).
 //   D2 — the live loop reads member replies through the parse*Structured
-//        wrappers: a schema-valid fenced payload wins, anything else falls back
-//        to the legacy text parse.
+//        wrappers: a schema-valid fenced payload is read, anything else falls back
+//        to the legacy text parse. REVISED 2026-07-13: the payload no longer
+//        *overrides* the prose markers it was declared additive to — the two
+//        channels are FUSED fail-safe (see the fusion describe block below).
 //   D3 — per-member/per-phase parse ok/fail/absent accrues on the result and is
 //        persisted in trace-{ts}.json so the operator can compute the <5%
 //        promotion criterion from saved traces alone.
@@ -127,13 +131,22 @@ function fenced(markers: string, payload: string): string {
   return `${markers}\n\`\`\`json\n${payload}\n\`\`\``;
 }
 
-describe("D2/D3 structured wrappers — fenced payload wins, fallback + outcome accrual", () => {
-  test("flag ON: a valid fenced vote payload wins over the legacy marker; outcome ok", async () => {
+describe("D2/D3 structured wrappers — fenced payload is read, fallback + outcome accrual", () => {
+  // Revised 2026-07-13. This test used to plant `CONSENSUS: BLOCK` in the prose and
+  // `{"decision":"accept"}` in the fence and assert the vote came out ACCEPT — i.e. it
+  // pinned veto-erasure as the intended contract. It is not: see the fusion block below.
+  // What the payload legitimately does is carry detail the markers left implicit, which is
+  // what this now proves (the fence is still read, outcome still accrues "ok").
+  test("flag ON: the fenced vote payload is read; it supplies the edits the marker left out", async () => {
     process.env[FLAG] = "1";
     const outcomes: StructuredParseOutcome[] = [];
-    const content = fenced("CONSENSUS: BLOCK\nBLOCK_KIND: PROTOCOL", '{ "decision": "accept" }');
+    const content = fenced(
+      "CONSENSUS: ACCEPT_WITH_EDITS",
+      '{ "decision": "accept_with_edits", "requiredEdits": "cite the benchmark" }',
+    );
     const vote = await parseRatificationVoteStructured(content, (outcome) => outcomes.push(outcome));
-    expect(vote.decision).toBe("accept");
+    expect(vote.decision).toBe("accept_with_edits");
+    expect(vote.requiredEdits).toBe("cite the benchmark");
     expect(vote.raw).toBe(content);
     expect(outcomes).toEqual(["ok"]);
   });
@@ -185,7 +198,11 @@ describe("D2/D3 structured wrappers — fenced payload wins, fallback + outcome 
     expect(outcomes).toEqual(["ok", "fail", "absent"]);
   });
 
-  test("flag ON: consensus-signal wrapper reads the payload status over the legacy markers", async () => {
+  // Unchanged assertions, renamed 2026-07-13: this passes under fusion too, but for a
+  // different reason. It is NOT "the payload beats the markers" (it no longer does) — it is
+  // that `diverged` is absorbing, so the payload's DIVERGED survives a prose CONVERGED. The
+  // symmetric case (payload CONVERGED over prose DIVERGED) is the hazard, and is pinned below.
+  test("flag ON: a payload DIVERGED survives a prose CONVERGED (diverged is absorbing)", async () => {
     process.env[FLAG] = "1";
     const outcomes: StructuredParseOutcome[] = [];
     const payload =
@@ -238,6 +255,122 @@ describe("D2/D3 structured wrappers — fenced payload wins, fallback + outcome 
     expect(isConverged(round)).toBe(false);
     const structured: ConsensusSignal[] = [{ status: "converged", hasMaterialDisagreements: false, disagreements: "" }];
     expect(isConverged(round, structured)).toBe(true);
+  });
+});
+
+// Two-channel fusion (2026-07-13). The structured payload is declared ADDITIVE to the legacy
+// markers ("the marker sections above remain required"), so every flag-on reply says the same
+// thing twice. The wrappers used to read only the JSON and discard the prose — which meant a
+// member could veto in prose and accept in its fence, and the engine would take the accept.
+// The two channels are now fused fail-safe: toward keeping a veto, toward more deliberation.
+describe("two-channel fusion — the payload cannot silently overrule the prose it was added to", () => {
+  test("prose BLOCK + payload accept => BLOCK: an absolute veto cannot be erased by the fence", async () => {
+    process.env[FLAG] = "1";
+    const content = fenced("CONSENSUS: BLOCK\nBLOCK_KIND: FACTUAL_ERROR", '{ "decision": "accept" }');
+    const vote = await parseRatificationVoteStructured(content);
+    expect(vote.decision).toBe("block");
+    // The kind is preserved, so the veto keeps its absolute classification downstream.
+    expect(vote.blockKind).toBe("FACTUAL_ERROR");
+  });
+
+  test("prose ACCEPT + payload block => BLOCK: fusion is symmetric, always the stricter channel", async () => {
+    process.env[FLAG] = "1";
+    const content = fenced("CONSENSUS: ACCEPT", '{ "decision": "block", "blockKind": "MATERIAL_DISAGREEMENT" }');
+    const vote = await parseRatificationVoteStructured(content);
+    expect(vote.decision).toBe("block");
+    expect(vote.blockKind).toBe("MATERIAL_DISAGREEMENT");
+  });
+
+  // The other direction of the fail-safe: a MISSING prose marker is not a veto. The legacy
+  // parser maps markerless => PROTOCOL block; naively fusing that would manufacture a false
+  // block for any member that answered cleanly in JSON and skipped the marker line — the very
+  // false-veto pathology Lane A removed. A silent prose channel is absence of evidence.
+  test("no prose marker + payload accept => ACCEPT: a silent prose channel manufactures no veto", async () => {
+    process.env[FLAG] = "1";
+    const vote = await parseRatificationVoteStructured(
+      fenced("I agree with the synthesis.", '{ "decision": "accept" }'),
+    );
+    expect(vote.decision).toBe("accept");
+  });
+
+  test("payload CONVERGED + prose disagreements => not converged: the round keeps deliberating", async () => {
+    process.env[FLAG] = "1";
+    // The live specimen: schema-valid, self-reported converged, empty disagreements — while
+    // the same member's prose markers list a material disagreement.
+    const payload =
+      '{ "candidateConsensus": "use Bun", "claims": [], "consensusStatus": "converged", "materialDisagreements": [] }';
+    const signal = await parseConsensusSignalStructured(
+      fenced("CONSENSUS_STATUS: CONVERGED\nMATERIAL_DISAGREEMENTS: the benchmark is unsound", payload),
+      undefined,
+    );
+    expect(signal.hasMaterialDisagreements).toBe(true);
+    expect(signal.disagreements).toBe("the benchmark is unsound");
+
+    // ...and that is what isConverged consumes, so the loop does not early-stop.
+    const round: ModelCouncilRound = {
+      index: 1,
+      proposals: [
+        { member: { name: "Opus 4.8", model: "claude-test" }, content: "irrelevant", candidateConsensus: "use Bun" },
+      ],
+      candidateConsensus: "use Bun",
+      changed: true,
+      similarityToPrevious: null,
+      memberAgreement: 0,
+    };
+    expect(isConverged(round, [signal])).toBe(false);
+  });
+
+  test("payload CONVERGED + prose DIVERGED => diverged", async () => {
+    process.env[FLAG] = "1";
+    const payload = '{ "candidateConsensus": "use Bun", "claims": [], "consensusStatus": "converged" }';
+    const signal = await parseConsensusSignalStructured(fenced("CONSENSUS_STATUS: DIVERGED", payload));
+    expect(signal.status).toBe("diverged");
+  });
+
+  test("agreeing channels fuse to themselves; a prose-silent reply fuses to exactly the payload", () => {
+    const agree = fuseConsensusSignals(
+      { status: "converged", hasMaterialDisagreements: false, disagreements: "" },
+      { status: "converged", hasMaterialDisagreements: false, disagreements: "NONE" },
+    );
+    expect(agree).toEqual({ status: "converged", hasMaterialDisagreements: false, disagreements: "" });
+
+    // No prose markers at all => the legacy parse yields `unknown`, which is neutral: the
+    // fused signal is the payload's own. This is what keeps the JSON-only reply unchanged.
+    const payloadOnly = fuseConsensusSignals(
+      { status: "converged", hasMaterialDisagreements: false, disagreements: "" },
+      { status: "unknown", hasMaterialDisagreements: false, disagreements: "" },
+    );
+    expect(payloadOnly.status).toBe("converged");
+
+    const voteOnly = fuseRatificationVotes(
+      { decision: "accept", raw: "r" },
+      { decision: "block", blockKind: "PROTOCOL", raw: "r" },
+      false, // no prose marker present — the block is the markerless PROTOCOL fallback
+    );
+    expect(voteOnly.decision).toBe("accept");
+  });
+
+  test("distinct disagreements from both channels are unioned; duplicates collapse", () => {
+    const fused = fuseConsensusSignals(
+      { status: "converged", hasMaterialDisagreements: true, disagreements: "the benchmark is unsound" },
+      { status: "converged", hasMaterialDisagreements: true, disagreements: "the runtime choice is unsettled" },
+    );
+    expect(fused.disagreements).toBe("the benchmark is unsound; the runtime choice is unsettled");
+
+    const deduped = fuseConsensusSignals(
+      { status: "diverged", hasMaterialDisagreements: true, disagreements: "same objection" },
+      { status: "diverged", hasMaterialDisagreements: true, disagreements: "same objection" },
+    );
+    expect(deduped.disagreements).toBe("same objection");
+  });
+
+  test("flag OFF: fusion is unreachable — the legacy parsers ignore the fence entirely", async () => {
+    delete process.env[FLAG];
+    const vote = await parseRatificationVoteStructured(
+      fenced("CONSENSUS: ACCEPT", '{ "decision": "block", "blockKind": "FACTUAL_ERROR" }'),
+    );
+    // Legacy: the prose marker is the ONLY channel. The fence's block is not read at all.
+    expect(vote.decision).toBe("accept");
   });
 });
 

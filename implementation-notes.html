@@ -32,6 +32,102 @@
 <p class="sub">A running log of decisions not in the original ask, changes, tradeoffs, and things to know.
 Maintained across the build-out of the multi-model autonomous council. Newest section first.</p>
 
+<h2>Session 2026-07-13 (later) — The authority fix: the payload can no longer overrule the prose</h2>
+
+<p class="sub">Acting on the recommendation after the gate-3 report. The council's objection to the
+<code>&lt;5%</code> promotion criterion was not just rhetoric — the failure mode it described is a live code
+path, and the parse-rate fix landed earlier the same day made it <em>more</em> reachable.</p>
+
+<div class="entry">
+  <h3>Fixing the parse rate widened the hazard it was measuring</h3>
+  <div class="meta">2026-07-13 16:05 <span class="tag heads-up">FYI</span></div>
+  <p>The strongest argument against my own morning's work. Before the <code>evidence</code> schema fix,
+  37.5% of structured payloads failed to parse and <strong>fell back to the legacy prose parse</strong> —
+  which is the <em>safe</em> channel. After the fix, essentially all payloads parse, so the engine now takes
+  model-authored JSON on the one question that decides whether deliberation stops.</p>
+  <p class="why">Why it matters: parse-rate improvements and safety move in opposite directions here. That
+  is a second, independent reason not to promote structured mode on a good-looking rate.</p>
+</div>
+
+<div class="entry">
+  <h3>Both structured seams took the JSON and discarded the prose they had demanded</h3>
+  <div class="meta">2026-07-13 16:20 <span class="tag decision">DECISION</span></div>
+  <p>The structured prompts end with "<em>the marker sections above remain required; the JSON payload is
+  additive</em>" — so every flag-on reply carries two channels. The wrappers read only the JSON:</p>
+  <ul>
+    <li><strong>Ratification (verdict-inverting).</strong> <code>parseRatificationVoteStructured</code>
+    returned the payload's <code>decision</code> wholesale. A member writing <code>CONSENSUS: BLOCK</code> /
+    <code>BLOCK_KIND: FACTUAL_ERROR</code> in prose and <code>{"decision":"accept"}</code> in its fence had
+    its <strong>absolute veto silently erased</strong>. <code>structuredLive.test.ts</code> pinned exactly
+    this case and asserted <code>accept</code> — the contract was wrong, and the test enshrined it.</li>
+    <li><strong>Convergence (truncates deliberation).</strong> <code>parseConsensusSignalStructured</code>
+    returned the payload's <code>consensusStatus</code> / <code>materialDisagreements</code> and never read
+    the markers, so a payload claiming <code>converged / []</code> over prose that argued the opposite
+    early-stopped the round. Post-F2 this only truncates deliberation (ratification still runs), so it is
+    the milder of the two.</li>
+  </ul>
+  <p>Both are now <strong>fused fail-safe</strong> (<code>fuseRatificationVotes</code> /
+  <code>fuseConsensusSignals</code>): votes resolve to the stricter channel, <code>diverged</code> is
+  absorbing, and a disagreement in either channel suppresses convergence.</p>
+  <p class="why">Why: a divergence between the two channels is not a "which one wins" question — it is
+  evidence the reply is internally inconsistent, and the only safe reading is the conservative one.</p>
+</div>
+
+<div class="entry">
+  <h3>A silent prose channel is absence of evidence, not a veto</h3>
+  <div class="meta">2026-07-13 16:25 <span class="tag tradeoff">TRADEOFF</span></div>
+  <p>The naive fusion ("always take the stricter channel") has a trap: the legacy parser maps a
+  <em>markerless</em> reply to a <code>PROTOCOL</code> block. Fusing that would manufacture a false veto
+  against any member who answered cleanly in JSON and skipped the marker line — reintroducing the exact
+  false-veto pathology Lane A was built to remove. So fusion only fires when an explicit
+  <code>CONSENSUS:</code> marker is present; a JSON-only reply fuses to exactly the JSON.</p>
+  <p class="why">Why: I gave up "strictest channel always wins" (simpler) to avoid resurrecting the
+  manufactured-veto bug. The cost is one extra predicate (<code>hasProseRatificationMarker</code>).</p>
+</div>
+
+<div class="entry">
+  <h3>Scope I added: the ratification seam was not in the recommendation</h3>
+  <div class="meta">2026-07-13 16:30 <span class="tag heads-up">OFF-SPEC</span></div>
+  <p>What I proposed (and what was approved) was the <em>convergence</em> authority fix. On reading the code
+  I found the ratification seam had the identical defect with a strictly worse blast radius — it erases
+  vetoes, which changes the outcome, whereas the convergence bug only costs a deliberation round. Fixing the
+  milder instance while leaving the severe one is indefensible, so I did both.</p>
+  <p class="why">Why flagged: it is scope I chose, not scope I was given.</p>
+</div>
+
+<div class="entry">
+  <h3>The docs asserted the structured path "does not control convergence." It does.</h3>
+  <div class="meta">2026-07-13 16:35 <span class="tag heads-up">FYI</span></div>
+  <p><code>docs/council.md</code> (Graduation gate) described the structured path as purely advisory. But
+  <code>isConverged(round, await structuredRoundSignals(round))</code> has been wired since Lane D — a
+  member's JSON can early-stop the loop. The false "it's advisory" belief is plausibly <em>how</em> the
+  fusion hazard survived review. Corrected in place.</p>
+</div>
+
+<div class="entry">
+  <h3>Fixed a flaky test that was never testing what it claimed</h3>
+  <div class="meta">2026-07-13 16:45 <span class="tag decision">DECISION</span></div>
+  <p><code>chat/bridge/actions.test.ts</code> ("emits live-update watcher notifications") failed once under
+  machine load. <code>fs.watch</code> arms asynchronously and the test guessed at how long with a fixed
+  <code>Bun.sleep(50)</code>; under load the state write landed first, no event ever fired, and it hung to
+  its timeout. It now proves the watcher is live by touching a sentinel until a change lands. Separately,
+  its second assertion (<code>waitFor(() =&gt; changes &gt;= 1)</code>) re-checked a condition the line above
+  had already made true — it could never fail, so the second state change was never actually verified.
+  Baselined it. Passes 5/5 solo and 3/3 with all 64 cores saturated.</p>
+  <p class="why">Why: unrelated to the council work, but a test that fails randomly teaches people to ignore
+  red, and a test that cannot fail is worse than no test.</p>
+</div>
+
+<div class="entry">
+  <h3>Structured-mode promotion remains PARKED</h3>
+  <div class="meta">2026-07-13 16:50 <span class="tag heads-up">FYI</span></div>
+  <p>Unchanged and deliberate: <code>AGENTS_COUNCIL_STRUCTURED</code> stays off by default. The parse rate
+  now reads 0%, which mechanically clears the <code>&lt;5%</code> bar — but that bar is the wrong gate, and
+  flipping the default on it would certify the transport and call it semantics. Whether structured mode gets
+  a real downstream consumer (the only credible one is <code>council-to-halo</code>) or gets shelved is an
+  operator decision, not mine.</p>
+</div>
+
 <h2>Session 2026-07-13 — Post-landing gates: push, branch cleanup, structured adoption</h2>
 
 <p class="sub">The three remaining user-gated items, executed. Gate 3 (structured-mode adoption) was run as a

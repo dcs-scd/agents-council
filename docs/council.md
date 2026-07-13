@@ -436,8 +436,32 @@ requests structured payloads and the live loop consumes them.
   degrades gracefully to the legacy text path.
 - **Parsing.** The live loop reads replies through `parseRatificationVoteStructured` /
   `parseConsensusSignalStructured` / `parseCandidateConsensusStructured`: a schema-valid fenced
-  payload wins; anything else (absent fence, invalid JSON, schema mismatch) falls back to the
+  payload is read; anything else (absent fence, invalid JSON, schema mismatch) falls back to the
   legacy text parse of the full reply.
+- **Two-channel fusion (2026-07-13).** Because the payload is *additive*, a flag-on reply states
+  its vote and its convergence signal **twice** — once in the markers, once in the JSON. The
+  wrappers no longer let the JSON silently overrule the prose it was added to. The channels are
+  fused **fail-safe**, via `fuseRatificationVotes()` / `fuseConsensusSignals()`:
+  - **Votes** resolve to the *stricter* channel (`block` > `accept_with_edits` > `accept`), so a
+    member that vetoes in prose cannot have that veto erased by an `accept` in its fence. The
+    non-deciding channel backfills a `blockKind` / `requiredEdits` the other left out.
+  - **Convergence**: `diverged` is absorbing, and a material disagreement raised in *either*
+    channel suppresses convergence — so a payload claiming `"consensusStatus": "converged",
+    "materialDisagreements": []` over prose that argues the opposite no longer stops the round.
+  - A **silent** prose channel is *absence of evidence, not a veto*: the legacy parser maps a
+    markerless reply to a `PROTOCOL` block, and fusing that naively would manufacture a false
+    veto against any member who answered cleanly in JSON and skipped the marker line. Only a
+    marker-backed prose vote fuses; a JSON-only reply fuses to exactly the JSON.
+
+  > **Why.** Divergence between the two channels is not a "which one wins" question — it is
+  > evidence the reply is internally inconsistent, and the only safe reading is the conservative
+  > one. The original contract ("the payload wins") was a silent-wrong-verdict hazard running in
+  > the dangerous direction: the engine would record a verdict the human reading the transcript
+  > could see the member arguing against. The council convened on 2026-07-13 produced exactly
+  > that specimen from its own round 3 — a schema-valid payload asserting convergence with no
+  > material disagreements, while the same member's prose argued the opposite. Note the
+  > interaction with the parse-rate fix landed the same day: raising the parse rate *increases*
+  > exposure here, because falling back to prose was the safe path.
 - **Parse-stats accrual.** Every structured parse attempt is recorded per member/phase as
   `ok` / `fail` / `absent` on `result.structuredParseStats` and persisted into `trace-{ts}.json`
   (`parseStats[]`), so the parse-fail promotion criterion is computable **offline from saved
@@ -650,8 +674,13 @@ than the text marker.
 
 ### Graduation gate (Wave C)
 
-The structured path is currently **advisory** — it adds artifacts and preconditions but does
-not control convergence. It graduates from advisory to **controlling** (issue-map-as-controller,
+The structured path is **mostly** advisory — it adds artifacts and preconditions. It is *not*
+inert, and an earlier version of this paragraph wrongly said it "does not control convergence":
+under the flag, `isConverged()` reads the payload's self-reported signal (via
+`structuredRoundSignals()`), so a member's JSON *can* early-stop the deliberation loop. Post-F2
+that only truncates deliberation — ratification runs on any non-empty candidate regardless — but
+"advisory" was never the whole truth, and the belief that it was is how the fusion hazard above
+survived review. It graduates from advisory to **controlling** (issue-map-as-controller,
 claim-ledger convergence, a Level-2 source-check verifier) only after clearing the Wave-C entry
 gate, which requires **both**:
 
@@ -661,6 +690,15 @@ gate, which requires **both**:
 At stage v2 the evidence for criterion 1 accrues automatically: each flag-on run persists its
 per-member/per-phase `ok`/`fail`/`absent` counts in `trace-{ts}.json` (`parseStats[]`), so the
 rate is computed from saved traces without re-running anything.
+
+> **Criterion 1 is contested and the flag stays OFF (2026-07-13).** A council convened to judge
+> the `< 5%` bar ruled it the *wrong gate*: parse success measures transport liveness, not
+> semantic correctness, and it produced the counterexample from its own round 3 — a schema-valid
+> payload asserting `converged` with no material disagreements while the same member's prose
+> argued the opposite. That is a 0% parse-fail rate on a wrong verdict. The rate is now best read
+> as a **build tripwire**, not a promotion criterion; the proposed replacements are a named
+> downstream consumer, a reasoning non-regression check, and field-level authority. Promotion is
+> parked pending an operator ruling — do **not** default the flag on because the rate looks good.
 
 On failure, the issue map is downgraded to audit-only, the F3 self-report and the provenance
 label gate are kept, and graduation stops. Wave C is recorded as deferred work in

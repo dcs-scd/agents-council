@@ -109,7 +109,26 @@ describe("chat bridge actions", () => {
       });
 
       try {
+        // fs.watch arms asynchronously. This used to be a bare `Bun.sleep(50)` — a guess at
+        // how long that takes, which loses under load: the state write lands before the
+        // watcher registers, no event ever fires, and the test hangs to its timeout. Prove
+        // the watcher is live instead, by touching a sentinel in the watched directory until
+        // a change lands (`state.json.arm` matches the watcher's `${targetName}.` prefix rule).
+        const sentinel = `${statePath}.arm`;
+        const armDeadline = Date.now() + 5000;
+        while (changes === 0) {
+          if (Date.now() > armDeadline) {
+            throw new Error("fs.watch never armed.");
+          }
+          await Bun.write(sentinel, "arm");
+          await Bun.sleep(20);
+        }
+        await rm(sentinel, { force: true });
+
+        // Let the arming traffic drain past the debounce, then count only what the real
+        // actions below cause.
         await Bun.sleep(50);
+        changes = 0;
 
         await startCouncilAction({
           agent_name: "host",
@@ -118,12 +137,17 @@ describe("chat bridge actions", () => {
 
         await waitFor(() => changes >= 1, 2000);
 
+        // Baseline before the second action: the original re-asserted `changes >= 1`, which
+        // the line above had already made true, so it could never fail and the second state
+        // change was never actually checked.
+        const afterStart = changes;
+
         await sendResponseAction({
           agent_name: "observer",
           content: "Watcher update confirmation.",
         });
 
-        await waitFor(() => changes >= 1, 2000);
+        await waitFor(() => changes > afterStart, 2000);
       } finally {
         watcher.close();
       }
