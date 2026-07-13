@@ -32,6 +32,65 @@
 <p class="sub">A running log of decisions not in the original ask, changes, tradeoffs, and things to know.
 Maintained across the build-out of the multi-model autonomous council. Newest section first.</p>
 
+<h2>Session 2026-07-13 — Post-landing gates: push, branch cleanup, structured adoption</h2>
+
+<p class="sub">The three remaining user-gated items, executed. Gate 3 (structured-mode adoption) was run as a
+live 2-member convene under <code>AGENTS_COUNCIL_STRUCTURED=1</code> and returned two findings, one of them
+more consequential than the gate itself.</p>
+
+<div class="entry">
+  <h3>Claim-ledger preconditions synthesize absolute vetoes that pre-empt <code>ratified_with_edits</code></h3>
+  <div class="meta">2026-07-13 13:10 <span class="tag heads-up">FYI</span></div>
+  <p>The first substantive live deliberation after landing came back <code>outcome: blocked</code> (exit 1) —
+  yet <em>both members voted <code>ACCEPT_WITH_EDITS</code></em>. The <code>blocked</code> came from the
+  claim-ledger precondition gate, which synthesized a <code>block</code> / <code>BLOCK_KIND: FACTUAL_ERROR</code>
+  ratification per member (<code>ASSUMPTION_NO_VERIFICATION: an assumption was emitted with no stated
+  cheapest_verification</code>) and attributed it <em>to the members</em>. Result: both names appear in
+  <code>acceptedWithEditsBy</code> <b>and</b> <code>blockedBy</code>; <code>fold</code> is <code>null</code>;
+  no <code>ratified_with_edits</code>.</p>
+  <p><b>Not lane fallout</b> — <code>git log -S ASSUMPTION_NO_VERIFICATION</code> traces it to <code>e956e0a</code>
+  (Claim-Ledger Delphi Wave A+B), present in the pre-lane base <code>b974c1e</code>. But it defeats Lane A's
+  headline fix in live use: an absolute veto that fires whenever a member states an assumption without a
+  <code>cheapest_verification</code> will fire on most real briefs, so the AWE-only slate can never reach the fold.
+  The 2026-07-12 acceptance smoke missed it only because its trivial prompt emitted no assumptions.</p>
+  <p class="why"><b>Why filed, not fixed:</b> the repair touches absolute-veto semantics — whether an engine
+  precondition failure is a veto at all, whether it may be attributed to a member who did not cast it, and
+  whether it may pre-empt the fold. That is a contract decision for the operator, not a mechanical fix, and it
+  is out of scope for "do the last three gates." Recommended: precondition failures become their own
+  non-veto class (surface in <code>minorityReport</code>, do not populate <code>blockedBy</code>, do not
+  suppress the fold).</p>
+</div>
+
+<div class="entry">
+  <h3>Structured mode parses cleanly (0% failure) — and the council says the gate is the wrong gate</h3>
+  <div class="meta">2026-07-13 13:05 <span class="tag decision">DECISION</span></div>
+  <p>Live 2-member run under <code>AGENTS_COUNCIL_STRUCTURED=1</code>, 3 rounds, 10 calls, 270,837 tokens,
+  ~20 min wall: <b>8/8 fenced-JSON payloads parsed, 0 fail / 0 absent</b> across both members in both the
+  deliberation and ratification phases. The wiring works end-to-end against real models (first time outside the
+  test seam), and the <code>&lt;5%</code> promotion criterion is mechanically met.</p>
+  <p>The council was asked whether that criterion is the right gate. Both members: <b>no</b>. Parse-failure rate
+  measures transport liveness, not semantic correctness — "a payload that says ACCEPT while the reasoning says
+  BLOCK scores 100%." They produced an in-vivo specimen from round 3 of their own deliberation: a member emitted
+  a schema-valid, enum-legal payload (<code>consensusStatus: converged, materialDisagreements: []</code>) while
+  its prose argued the candidate was materially stronger than its own draft. Parse-failure on that turn: 0%.
+  Proposed replacement gates: a named downstream consumer, reasoning non-regression, field-level authority
+  (prose stays authoritative where the schema lacks parity), with parse rate demoted to a build tripwire.</p>
+  <p class="why"><b>Why the flag stays off:</b> the measurement passed but the criterion it was measured against
+  is now discredited by the only evidence we have. Flipping the default on a 0% reading would be acting on a
+  number the council just demonstrated is blind to the failure mode that matters. Promotion stays parked pending
+  an operator ruling on the replacement gates.</p>
+</div>
+
+<div class="entry">
+  <h3>Push + lane-branch cleanup executed</h3>
+  <div class="meta">2026-07-13 12:55 <span class="tag change">CHANGE</span></div>
+  <p><code>feat/council-consensus-hardening</code> fast-forwarded <code>b974c1e..2e7c556</code> onto
+  <code>origin</code> (<code>github.com:dcs-scd/agents-council</code>). <code>lane/council-{a,b,c,d}</code> and
+  <code>council-hardening-integration</code> deleted after confirming all five were merged into HEAD.
+  <code>halo/council-claim-ledger</code> left alone — checked out in another worktree.</p>
+  <p class="why"><b>Why:</b> operator gated all three in ("do the last three gates").</p>
+</div>
+
 <h2>Session 2026-07-12 — Landing: skills into ~/.claude + live acceptance</h2>
 
 <p class="sub">Final phase of the council-hardening build. Primary checkout fast-forwarded to the
